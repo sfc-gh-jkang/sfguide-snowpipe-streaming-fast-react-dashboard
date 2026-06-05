@@ -1,0 +1,33 @@
+definition_version: "2"
+
+# This file is templated by deploy-app.sh — `${VAR}` tokens are substituted
+# from .env at deploy time and the rendered file is written to a temp path
+# before `snow app run` reads it. DO NOT edit the rendered file; edit this
+# template and the .env values.
+
+entities:
+  credit_dashboard:
+    type: snowflake-app
+    identifier:
+      name: ${DASHBOARD_APP_NAME}
+      database: ${APP_DB}
+      schema: ${APP_SCHEMA}
+    artifacts:
+      - src: ./*
+        dest: ./
+        ignore:
+          - node_modules
+          - .env*
+          - __pycache__
+          - "*.pyc"
+          - .next
+          - .git
+          - snowflake.log
+
+    query_warehouse: ${STANDARD_WH}
+    build_compute_pool:
+      name: ${DASHBOARD_POOL}
+    service_compute_pool:
+      name: ${DASHBOARD_POOL}
+    build_eai:
+      name: ${DASHBOARD_EAI}

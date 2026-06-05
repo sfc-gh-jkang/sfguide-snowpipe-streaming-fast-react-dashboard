@@ -1,0 +1,15 @@
+profile:
+  label: "Credit Desk Dashboard"
+  description: "Real-time credit trading dashboard. Snowpipe Streaming HPA + Interactive Tables + Cortex Agent."
+
+install:
+  commands:
+    # `npm run build` runs `next build` then a postbuild that copies our
+    # custom WebSocket-aware server.js over the auto-generated standalone
+    # server.js, plus the static + public dirs. See package.json scripts.
+    - ["npm", "ci", "--include=dev"]
+    - ["npm", "run", "build"]
+
+run:
+  command: ["node", ".next/standalone/server.js"]
+  port: 3000

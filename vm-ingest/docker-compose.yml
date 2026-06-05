@@ -1,0 +1,75 @@
+services:
+  credit-ingest:
+    build: .
+    container_name: credit-ingest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keys:/etc/credit/keys:ro
+    environment:
+      # Use ${VAR} substitution so .env supplies real values. Hardcoding a literal
+      # like "<your-snowflake-account>" silently passes the placeholder through
+      # to the HPA SDK, which then fails JWT auth with a confusing error.
+      SNOWFLAKE_ACCOUNT: "${SNOWFLAKE_ACCOUNT:-<set-via-env-SNOWFLAKE_ACCOUNT>}"
+      SNOWFLAKE_USER: "CREDIT_INGEST_USR"
+      SNOWFLAKE_ROLE: "CREDIT_INGEST_RL"
+      SNOWFLAKE_DATABASE: "SNOWFLAKE_EXAMPLE"
+      SNOWFLAKE_SCHEMA: "CREDIT_DEMO"
+      SNOWFLAKE_TABLE: "RAW_EVENTS"
+      SNOWFLAKE_PRIVATE_KEY_PATH: "/etc/credit/keys/credit_ingest.p8"
+      PARTITION_COUNT: "4"
+      INGEST_API_KEY: "${INGEST_API_KEY:-<set-via-env-INGEST_API_KEY>}"
+      OTEL_SERVICE_NAME: "credit-ingest"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://observe-agent:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+    depends_on:
+      - observe-agent
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  observe-agent:
+    image: observeinc/observe-agent:2.0.0
+    container_name: credit-observe-agent
+    restart: unless-stopped
+    volumes:
+      - ./observe-agent.yaml:/etc/observe-agent/observe-agent.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:13133/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Cloudflare Tunnel — routes public HTTPS to credit-ingest:8080.
+  # Set CLOUDFLARE_TUNNEL_TOKEN in .env (grab from Cloudflare Zero Trust dashboard).
+  # Remove this service if you run cloudflared on the host instead (Path 2).
+  cloudflared:
+    image: cloudflare/cloudflared:2025.7.0
+    container_name: credit-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      credit-ingest:
+        condition: service_healthy
+    networks: [default]
+    profiles: [tunnel]
+
+  # Quick-tunnel — ephemeral *.trycloudflare.com URL, no Cloudflare account needed.
+  # Run with: docker compose --profile quick up
+  # Then check logs: docker compose logs cloudflared-quick | grep trycloudflare
+  # Each restart yields a NEW random URL (tunnel is anonymous + ephemeral).
+  cloudflared-quick:
+    image: cloudflare/cloudflared:2025.7.0
+    container_name: credit-cloudflared-quick
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://credit-ingest:8080
+    depends_on:
+      credit-ingest:
+        condition: service_healthy
+    networks: [default]
+    profiles: [quick]

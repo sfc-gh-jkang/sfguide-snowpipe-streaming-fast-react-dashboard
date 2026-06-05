@@ -1,0 +1,30 @@
+# Terraform variables — copy to terraform.tfvars and fill in.
+# NEVER commit terraform.tfvars to git (it contains secrets).
+
+# ---- GCP ----
+# Project ID from: gcloud config get-value project
+gcp_project = "my-gcp-project-id"
+
+# Region/zone (defaults are us-central1 / us-central1-c)
+# gcp_region = "us-central1"
+# gcp_zone   = "us-central1-c"
+
+# VM name and size
+# vm_name         = "credit-ingest"
+# vm_machine_type = "e2-small"
+
+# ---- Cloudflare ----
+# Zone ID:    https://dash.cloudflare.com → select your domain → Overview → right sidebar "Zone ID"
+# Account ID: https://dash.cloudflare.com → right sidebar "Account ID"
+cloudflare_zone_id    = "your-zone-id-hex"
+cloudflare_account_id = "your-account-id-hex"
+
+# Subdomain for the CNAME record (e.g. "credit-ingest" → credit-ingest.yourdomain.com)
+# ingest_subdomain = "credit-ingest"
+
+# ---- App ----
+# Strong random API key for ingest auth (e.g. openssl rand -hex 32)
+ingest_api_key = "CHANGE-ME-generate-with-openssl-rand-hex-32"
+
+# Git clone URL for the demo repo
+repo_url = "https://github.com/your-org/sfguide-snowpipe-streaming-interactive-demo.git"

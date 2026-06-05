@@ -1,0 +1,138 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --snow-blue: #29B5E8;
+  --snow-blue-dark: #1B9CD6;
+  --snow-green: #21BA45;
+  --snow-red: #FF4B4B;
+  --snow-orange: #FFA500;
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+}
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+/* KPI Tile styling — matches parent fork's div[data-testid="stMetric"] */
+.kpi-tile {
+  background: rgba(41, 181, 232, 0.08);
+  border: 1px solid rgba(41, 181, 232, 0.2);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.kpi-tile-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.kpi-tile-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-top: 4px;
+}
+
+.kpi-tile-delta {
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+/* Header strip */
+.header-strip {
+  background: linear-gradient(90deg, var(--snow-blue) 0%, var(--snow-blue-dark) 100%);
+  padding: 12px 24px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.header-strip h1 {
+  color: white;
+  font-size: 22px;
+  margin: 0;
+  font-weight: 700;
+}
+
+.header-strip p {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 13px;
+  margin: 4px 0 0 0;
+}
+
+/* Tab navigation */
+.tab-active {
+  border-bottom: 3px solid var(--snow-blue);
+  color: var(--snow-blue);
+  font-weight: 600;
+}
+
+.tab-inactive {
+  border-bottom: 3px solid transparent;
+  color: var(--text-secondary);
+}
+
+/* Live tape row statuses */
+.tape-row-pending {
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.tape-row-verified {
+  background: rgba(33, 186, 69, 0.08);
+}
+
+/* Latency badges */
+.badge-fast {
+  background: rgba(33, 186, 69, 0.15);
+  color: var(--snow-green);
+}
+
+.badge-mid {
+  background: rgba(255, 165, 0, 0.15);
+  color: var(--snow-orange);
+}
+
+.badge-slow {
+  background: rgba(255, 75, 75, 0.15);
+  color: var(--snow-red);
+}
+
+.latency-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Chat messages */
+.chat-user {
+  background: rgba(41, 181, 232, 0.1);
+  border-radius: 12px 12px 2px 12px;
+}
+
+.chat-assistant {
+  background: var(--bg-secondary);
+  border-radius: 12px 12px 12px 2px;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-secondary);
+  border-radius: 3px;
+}

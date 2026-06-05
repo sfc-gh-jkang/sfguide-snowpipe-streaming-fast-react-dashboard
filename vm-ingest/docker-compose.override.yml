@@ -1,0 +1,10 @@
+# Local-test override (NOT committed). Removes observe-agent dep + injects .env.
+services:
+  credit-ingest:
+    environment:
+      SNOWFLAKE_ACCOUNT: "${SNOWFLAKE_ACCOUNT}"
+      SNOWFLAKE_USER: "${SNOWFLAKE_USER}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+    depends_on: !reset []
+  cloudflared-quick:
+    depends_on: !reset []  # don't gate on health, healthcheck depends on observe-agent

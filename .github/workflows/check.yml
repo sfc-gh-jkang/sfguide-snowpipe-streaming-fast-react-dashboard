@@ -1,0 +1,76 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+# Cancel in-flight runs on the same branch when a new commit is pushed.
+# Keeps CI minutes from piling up during rapid iteration.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+# Pin to Node.js 24 explicitly. GitHub forces this default starting June 2nd 2026
+# anyway; setting it now silences the deprecation warning on every run.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  web:
+    name: web/ — typecheck + lint + test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test -- --ci
+
+  vm-ingest:
+    name: vm-ingest/ — ruff
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vm-ingest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uvx ruff check .
+
+  mermaid:
+    name: README.md — Mermaid syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Render Mermaid blocks from README
+        run: |
+          # Puppeteer config: GitHub runners don't allow unprivileged user
+          # namespaces, so Chromium can't enable its sandbox. --no-sandbox is
+          # safe here because we're rendering local-only Mermaid source.
+          cat > /tmp/puppeteer-config.json <<'EOF'
+          { "args": ["--no-sandbox", "--disable-setuid-sandbox"] }
+          EOF
+          # Extract every ```mermaid block and verify mmdc parses each one.
+          awk '/^```mermaid$/{flag=1; n++; printf "" > "block-" n ".mmd"; next} /^```$/{flag=0} flag{print > "block-" n ".mmd"}' README.md
+          for f in block-*.mmd; do
+            [ -s "$f" ] || continue
+            echo "Rendering $f..."
+            npx --yes @mermaid-js/mermaid-cli \
+              -p /tmp/puppeteer-config.json \
+              -i "$f" -o "${f%.mmd}.png"
+          done

@@ -1,0 +1,15 @@
+[project]
+name = "credit-ingest"
+version = "0.2.0"
+description = "ACME Credit Demo — Snowpipe Streaming HPA ingest worker"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.0",
+    "snowpipe-streaming>=1.0",
+    "cryptography>=43",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+]
