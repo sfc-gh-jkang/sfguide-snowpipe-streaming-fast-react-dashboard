@@ -7,9 +7,9 @@
 
 ## 60-second narrative (open with this)
 
-> "Every piece of the streaming pipeline here is sub-second — Snowpipe Streaming commits in 30 milliseconds, the row is queryable in 150ms, Interactive Warehouse returns it in 250ms. Traditional dashboards add 3-5 seconds of latency because they re-render the entire page on every interaction.
+> "Every piece of the streaming pipeline here is sub-second — Snowpipe Streaming commits in 30 milliseconds, the row is queryable in 150ms, Interactive Warehouse returns it in 250ms. Traditional dashboards add ~1.6 seconds of latency on every interaction — up to 3.4s at p95 — because they re-render the entire page.
 >
-> What you're about to see is a React dashboard running on Snowpark Container Services with a WebSocket push model. The tile update after a click is under 100 milliseconds. Same data path — HPA SDK, Interactive Tables, Cortex Agent — but with a rendering model that diffs one component instead of rebuilding the page. Let me show you."
+> What you're about to see is a React dashboard running on Snowpark Container Services with a WebSocket push model. After a click, the just-fired row appears optimistically in about 0.4 seconds — and React's render step itself is only ~10 milliseconds — because it diffs one component instead of re-running the whole script. Same data path — HPA SDK, Interactive Tables, Cortex Agent. Let me show you."
 
 ## What changed (and what didn't)
 
@@ -20,7 +20,7 @@
 | Interactive Table | RAW_EVENTS (streaming target + serving) | RAW_EVENTS (streaming target + serving) | Unchanged |
 | Interactive Warehouse | CREDIT_DEMO_INT_WH | CREDIT_DEMO_INT_WH | Unchanged |
 | Cortex Agent | CREDIT_AGENT | CREDIT_AGENT | Unchanged |
-| **UI framework** | **Full-page rerun (3-5s)** | **Next.js + WebSocket (<100ms)** | **30-50x faster** |
+| **UI framework** | **Full-page rerun (~1.6s p50, 3.4s p95)** | **Next.js + WebSocket (optimistic row ~0.4s, render step ~10ms)** | **~4× faster to see the row** |
 
 ## Demo script (8 minutes)
 
@@ -32,13 +32,13 @@
 ### Beat 2 — "The click" (1:00-2:30)
 
 - Click **Trade**.
-- Point at the latency timeline: "~50ms total. The grey flash you saw was the optimistic ack — the app assumed success before the DB confirmed. The green flash 150ms later is the verified ack — HPA actually committed. React updated just that one tile, not the whole page."
-- Click 5 more times rapidly. All bars stack. None exceed 100ms for the visible update.
+- Point at the latency timeline: "The grey flash you saw was the optimistic ack — the app prepended the row as soon as the commit acked (~0.4s), before the next full poll. The green flash later is the verified ack — HPA actually committed. React updated just that one tile, not the whole page."
+- Click 5 more times rapidly. All bars stack. Each render/diff is a few milliseconds; the rows appear optimistically in well under half a second.
 
 ### Beat 3 — "Why it's fast" (2:30-4:00)
 
-- Point at the tape: "Traditional dashboards poll the database every few seconds and redraw the entire page — 3-5 seconds of dead air after every click. Here, the WebSocket pushes only the changed rows at 200ms cadence. React diffs one component, not the full DOM."
-- Fire **Trade** again. Point at the timeline bar. "That bar is the *entire* round trip — click to painted pixel. Under 100ms. The optimistic ack fires before Snowflake even confirms the commit. When the Interactive Table confirms (~2400ms), the row goes solid green. Zero wasted re-renders."
+- Point at the tape: "Traditional dashboards poll the database every few seconds and redraw the entire page — ~1.6 seconds of dead air after every click (up to 3.4s at p95). Here, the WebSocket pushes only the changed rows at 200ms cadence. React diffs one component, not the full DOM."
+- Fire **Trade** again. Point at the timeline bar. "That bar breaks down the round trip — network, SDK append, HPA flush. The optimistic row appears in about 0.4 seconds, before the next full poll — the ack fires as soon as Snowflake confirms the commit. When the Interactive Table makes it queryable (~2400ms), the row goes solid green. React's own render step is ~10ms — zero wasted re-renders."
 - "Same HPA commit. Same Interactive Table. Same row. The difference is purely the rendering model."
 
 ### Beat 4 — "What this means for your desk" (4:00-5:00)
@@ -57,18 +57,18 @@
 
 - Fire one more trade in the React UI.
 - Switch to Ask the Book: "What was our most recent trade?"
-- Agent finds it. "That row was committed 150ms after you clicked, queryable in 250ms, visible on the tile in <100ms, and the Agent found it in the book within 10 seconds. Five layers — ingest, storage, serving, AI, UI — all Snowflake, one account."
+- Agent finds it. "That row was committed 150ms after you clicked, queryable in 250ms, shown optimistically on the tile in ~0.4s, and the Agent found it in the book within 10 seconds. Five layers — ingest, storage, serving, AI, UI — all Snowflake, one account."
 
 ### Beat 7 — "The closer" (7:30-8:00)
 
-- Show the architecture diagram. "The only thing outside Snowflake is the producer VM — and that's by design, because the HPA SDK is a client library. Everything else — serving, AI, dashboard — is managed by Snowflake. The 3-5 second gap is gone."
+- Show the architecture diagram. "The only thing outside Snowflake is the producer VM — and that's by design, because the HPA SDK is a client library. Everything else — serving, AI, dashboard — is managed by Snowflake. The ~1.6-second full-rerun gap is gone."
 
 ## What the customer should walk away believing
 
-1. **The streaming pipeline was never slow** — Snowflake commits in 30ms, queries in 250ms. The 3-5s was the UI framework, not the platform.
+1. **The streaming pipeline was never slow** — Snowflake commits in 30ms, queries in 250ms. The ~1.6s (up to 3.4s p95) was the UI framework, not the platform.
 2. **SPCS is production-ready for internal dashboards** — OAuth gated, no separate auth, scales with compute pool sizing.
 3. **WebSocket push eliminates polling waste** — 200ms cadence, diff-only broadcasts, React.memo prevents off-slice re-renders.
-4. **The speed is undeniable** — same data, same path, <100ms visible response. Record the screen.
+4. **The speed is undeniable** — same data, same path, the row appears optimistically in ~0.4s and the render step is ~10ms. Record the screen.
 5. **Cortex Agent works with any frontend** — SSE streaming gives token-by-token UX regardless of the calling framework.
 
 ## Anticipated questions

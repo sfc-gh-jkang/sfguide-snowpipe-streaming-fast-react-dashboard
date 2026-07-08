@@ -84,9 +84,9 @@ They share: `CREDIT_DEMO` schema, `RAW_EVENTS`, `POSITIONS_DIM`, `CREDIT_DEMO_IN
 
 3. Start a screen recording.
 
-4. Click "New Trade" in the **React tab** — observe <100ms tile update.
+4. Click "New Trade" in the **React tab** — the optimistic row appears in ~0.4s (render step ~10ms).
 
-5. Click "New Trade" in the **Streamlit tab** — observe 3-5s full-page rerun.
+5. Click "New Trade" in the **Streamlit tab** — observe the ~1.6s full-page rerun (up to 3.4s p95).
 
 6. Both events land in the same `RAW_EVENTS` table and both dashboards show them — the difference is purely how fast each framework reflects the change.
 

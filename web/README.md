@@ -1,6 +1,6 @@
 # ACME Credit Desk — Next.js Frontend
 
-React dashboard for the Snowpipe Streaming HPA demo. Replaces Streamlit with WebSocket-driven real-time updates targeting <100ms p50 visible loop.
+React dashboard for the Snowpipe Streaming HPA demo. Replaces Streamlit with WebSocket-driven real-time updates: the optimistic row appears in ~0.4s (render step ~10ms) vs Streamlit's ~1.6s full-script rerun.
 
 ## Local Development
 

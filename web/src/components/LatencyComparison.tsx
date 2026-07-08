@@ -140,7 +140,7 @@ export function LatencyComparison() {
     // Wire-delivery latency is also MEASURED on the live WS connection.
     const wsDetectAndPushMs = scanDetectRawMs + wsRawMs;
     const reactRender = fullPageRawMs;
-    const streamlitRender = STREAMLIT_RENDER_MS.midpoint;
+    const streamlitRender = STREAMLIT_RENDER_MS.typical;
 
     // Bar labels reflect the ACTUAL measured value, not stale hardcoded
     // approximations. (~0.4 s style labels lied when measurements drifted.)
@@ -375,8 +375,8 @@ export function LatencyComparison() {
                 </tr>
                 <tr>
                   <td className="pr-3 py-1 text-slate-200">Streamlit equivalent</td>
-                  <td className="pr-3 py-1 text-slate-300">~2500 ms (no separate ack — page freezes during rerun)</td>
-                  <td className="py-1 text-slate-300">~2519 ms rerun (apples-to-apples scope)</td>
+                  <td className="pr-3 py-1 text-slate-300">~1646 ms (no separate ack — page freezes during rerun)</td>
+                  <td className="py-1 text-slate-300">~1646 ms rerun (p50, apples-to-apples scope)</td>
                 </tr>
               </tbody>
             </table>
@@ -397,9 +397,9 @@ export function LatencyComparison() {
               Streamlit doesn&apos;t have a &quot;diff what changed&quot; model.
               Every interaction = full re-render of every component on the page.
               Server reruns <code>app.py</code> top-to-bottom, re-executes all
-              12 queries (~2.5 s), sends the WHOLE rendered page back over
+              12 queries (~1.6 s p50), sends the WHOLE rendered page back over
               WebSocket, browser tears down and rebuilds everything visible.
-              That&apos;s why the page freezes for 2.5 s.
+              That&apos;s why the page freezes for ~1.6 s.
             </p>
           </div>
           <div>
@@ -422,7 +422,7 @@ export function LatencyComparison() {
             <pre className="text-[10px] leading-tight text-slate-300 whitespace-pre overflow-x-auto">
 {`t = 0 ms:       Click → POST /api/ingest fires
 t = 10 ms:      ✓ React paints click ack (latency bar + text)
-                  ↑ this is what you "FEEL" — Streamlit users wait 2.5 s for
+                  ↑ this is what you "FEEL" — Streamlit users wait ~1.6 s for
                     this same feedback because their page is frozen mid-rerun
 
 ──── meanwhile, on a separate 1.5 s polling timer ────
@@ -610,7 +610,7 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
               itVisibilityMs +
               wsDetectAndPushMs +
               fullPageMedianMs;
-            const streamlitE2E = clickPipelineMs + STREAMLIT_RENDER_MS.midpoint;
+            const streamlitE2E = clickPipelineMs + STREAMLIT_RENDER_MS.typical;
             const delta = streamlitE2E - reactE2E;
             const tied = Math.abs(delta) < 500; // within 0.5 s = effectively tied
             return (
@@ -637,7 +637,7 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
                   Streamlit (rerun): <strong>~{(streamlitE2E / 1000).toFixed(2)}s</strong>{" "}
                   <span className="text-slate-500">
                     = click {(clickPipelineMs / 1000).toFixed(2)}s + rerun{" "}
-                    {(STREAMLIT_RENDER_MS.midpoint / 1000).toFixed(1)}s
+                    {(STREAMLIT_RENDER_MS.typical / 1000).toFixed(1)}s
                   </span>
                 </div>
                 <div className="mt-2 pt-2 border-t border-slate-700">
@@ -671,22 +671,29 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
                   <div className="font-semibold mb-1">Where React actually wins:</div>
                   <ul className="list-disc list-inside space-y-0.5 text-slate-400">
                     <li>
-                      <strong className="text-slate-200">Click acknowledgment paint:</strong>{" "}
+                      <strong className="text-slate-200">Optimistic row appears:</strong>{" "}
                       {med?.render != null
                         ? (() => {
-                            const factor = STREAMLIT_RENDER_MS.midpoint / Math.max(med.render, 1);
+                            // Honest "row appears" = click pipeline (net+sdk+flush)
+                            // + render step. NOT render alone. Compared to Streamlit's
+                            // full rerun before its table shows the row.
+                            const rowVisibleMs = clickPipelineMs + med.render;
+                            const factor = STREAMLIT_RENDER_MS.typical / Math.max(rowVisibleMs, 1);
                             return (
                               <>
-                                <strong>{med.render.toFixed(0)} ms</strong> (React, live median) vs{" "}
-                                <strong>~{(STREAMLIT_RENDER_MS.midpoint / 1000).toFixed(1)} s</strong> (Streamlit baseline) — <strong>~{factor.toFixed(0)}× faster</strong>{" "}
-                                perceived feedback. The button feels instant.
+                                the just-fired row shows in{" "}
+                                <strong>~{(rowVisibleMs / 1000).toFixed(2)} s</strong> (click pipeline{" "}
+                                {(clickPipelineMs / 1000).toFixed(2)} s + <strong>{med.render.toFixed(0)} ms</strong> render step)
+                                vs <strong>~{(STREAMLIT_RENDER_MS.typical / 1000).toFixed(1)} s</strong> for Streamlit&apos;s full rerun —{" "}
+                                <strong>~{factor.toFixed(1)}× faster</strong> to see the row. (The render step itself is ~{med.render.toFixed(0)} ms; the button also shows an instant loading state on click.)
                               </>
                             );
                           })()
                         : (
                             <>
-                              ~10 ms (React) vs ~{(STREAMLIT_RENDER_MS.midpoint / 1000).toFixed(1)} s (Streamlit) — <strong>~{Math.round(STREAMLIT_RENDER_MS.midpoint / 10)}× faster</strong>{" "}
-                              perceived feedback (archetypal — fire a click to see live values).
+                              the just-fired row shows in ~0.4 s (click pipeline + ~10 ms render step)
+                              vs ~{(STREAMLIT_RENDER_MS.typical / 1000).toFixed(1)} s for Streamlit&apos;s rerun —{" "}
+                              ~4× faster to see the row (archetypal — fire a click to measure live).
                             </>
                           )
                       }
@@ -910,10 +917,10 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
         <p className="text-xs text-slate-300 mb-3">
           React render lifecycle: <strong>{fullPageMedianMs.toFixed(0)} ms</strong>{" "}
           (median, n={fullPageRenderTimings.length}) ·{" "}
-          Streamlit rerun: <strong>~{STREAMLIT_RENDER_MS.midpoint} ms</strong>{" "}
-          (measured) →{" "}
+          Streamlit rerun: <strong>~{STREAMLIT_RENDER_MS.typical} ms</strong>{" "}
+          (p50 baseline) →{" "}
           <span className="text-violet-300 font-semibold">
-            ~{(STREAMLIT_RENDER_MS.midpoint / Math.max(fullPageMedianMs, 1)).toFixed(1)}× faster
+            ~{(STREAMLIT_RENDER_MS.typical / Math.max(fullPageMedianMs, 1)).toFixed(1)}× faster
             on render lifecycle (architectural difference)
           </span>
         </p>
@@ -1061,8 +1068,8 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
                   <td><strong>{STREAMLIT_RENDER_MS.p95} ms</strong></td>
                 </tr>
                 <tr>
-                  <td className="pr-4">midpoint shown on chart</td>
-                  <td><strong>{STREAMLIT_RENDER_MS.midpoint} ms</strong></td>
+                  <td className="pr-4">shown on chart</td>
+                  <td><strong>{STREAMLIT_RENDER_MS.typical} ms</strong> (p50)</td>
                 </tr>
               </tbody>
             </table>

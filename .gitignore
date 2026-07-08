@@ -21,6 +21,9 @@ dist/
 *.tfstate.backup
 .terraform.lock.hcl
 **/.terraform.lock.hcl
+# tfvars can hold real infra IDs / secrets — never commit; ship only the .example
+*.tfvars
+!*.tfvars.example
 
 # OS
 .DS_Store

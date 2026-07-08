@@ -145,17 +145,21 @@ export const REACT_FORK_SERVING_MS = {
  * ============================================================================
  *
  * The React fork's `render_ms` measures `t2_painted - t1_post_done` via
- * `requestAnimationFrame×2` — that is **click-acknowledgment paint of one
- * row**, NOT the time for the polled tape refresh. The polled tape refresh
- * adds ~1500 ms polling phase + ~800 ms snapshot fetch + ~50 ms reconcile
- * = ~2400 ms wall-clock, which is comparable to Streamlit's 1646 ms typical
+ * `requestAnimationFrame×2` — that is the **render/paint step of one row
+ * AFTER the POST returns**, NOT the click→visible latency and NOT the polled
+ * tape refresh. The honest click→optimistic-row-visible = click pipeline
+ * (net+SDK+flush, ~0.4 s) + render step (~10 ms) ≈ ~0.4 s. The polled tape
+ * refresh adds ~1500 ms polling phase + ~800 ms snapshot fetch + ~50 ms
+ * reconcile = ~2400 ms wall-clock, comparable to Streamlit's 1646 ms typical
  * rerun.
  *
- * The headline speedup is real but specifically about user-perceived click
- * feedback (10 ms paint vs 1646 ms rerun, 165× faster). For tape-data
- * freshness (click → row visible in tape), the two architectures are
- * comparable; React wins on optimistic prepend, Streamlit wins on pure
- * server-rendered consistency.
+ * The real, defensible win is on "the row appears": React shows the just-fired
+ * row optimistically in ~0.4 s vs Streamlit's ~1.6 s full rerun (~4× faster to
+ * see the row), and the React render step itself is only ~10 ms. Do NOT compare
+ * the 10 ms render step directly against the 1.6 s full rerun — that is an
+ * apples-vs-oranges unit mismatch. For full-dashboard data freshness the two
+ * architectures are comparable; React additionally stays fresh between clicks
+ * (polling) while Streamlit goes stale until the next rerun.
  *
  * The `LatencyComparison` component labels each bar accordingly to avoid
  * apples-vs-oranges.
@@ -190,9 +194,10 @@ export const STREAMLIT_QUERIES_PER_RERUN = {
 
 /**
  * Streamlit render-segment baseline range (ms) — directly measured.
- *   typical = p50 burst rerun = 1646 ms
+ *   typical = p50 burst rerun = 1646 ms  ← headline number, shown on chart + README
  *   p95     = p95 burst rerun = 3391 ms
- *   midpoint = (1646 + 3391) / 2 = 2519 ms (used as headline number)
+ *   midpoint = (1646 + 3391) / 2 = 2519 ms (retained for reference only; NOT
+ *              used as the headline — the chart and README both show p50)
  */
 export const STREAMLIT_RENDER_MS = {
   typical: STREAMLIT_RERUN_MEASURED_MS.p50, // 1646

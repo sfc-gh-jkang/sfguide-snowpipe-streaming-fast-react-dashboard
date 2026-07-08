@@ -6,7 +6,7 @@
 
 A real-time credit-trading dashboard. Operators on a credit desk fire trades, marks, and credit events; rows commit to Snowflake via Snowpipe Streaming HPA in ~30 ms; the dashboard shows the trade tape, P&L, sector exposure, top marks, watchlist, and a Cortex Agent chat that answers questions about the position book.
 
-> Snowpipe Streaming **HPA** + **Interactive Tables** + **Cortex Agent** + **Next.js on SPCS** — same data pipeline as the parent fork, but with **~10 ms click-acknowledgment paint** (measured live in-browser) vs Streamlit's ~1.6 s full-script rerun (historical baseline from the parent demo — see provenance note below).
+> Snowpipe Streaming **HPA** + **Interactive Tables** + **Cortex Agent** + **Next.js on SPCS** — same data pipeline as the parent fork, but the just-fired row appears optimistically in **~0.4 s** (click pipeline + a ~10 ms React render step, measured live in-browser) vs Streamlit's ~1.6 s full-script rerun — **~4× faster to see the row**, with full-dashboard freshness comparable (Streamlit numbers are a historical baseline from the parent demo — see provenance note below).
 
 This is a performance fork of the parent demo `sfguide-snowpipe-streaming-interactive-demo` (Streamlit-on-Snowflake). The VM producer, the HPA SDK ingest path, the Interactive Tables, and the Cortex Agent spec are unchanged. The presentation layer is what's different: Streamlit on Snowflake is replaced by a Next.js 14 React app on SPCS, served behind Snowsight's OAuth gate. Tile updates run on a 200 ms server-side polling loop with WebSocket diff-push to the browser; full-snapshot fetches run client-side every 1.5 s as a periodic truth source.
 
@@ -39,7 +39,8 @@ The latency table below mixes three number sources — live in-browser measureme
 | Serving-query server-side time on **Interactive WH** | 60ms p50 / 95ms p95 *(historical: old single-row lookup, parent demo, 2026-05-19)* | **130ms p50 / 151ms p95** (n=30, book rollup, re-benchmarked 2026-07-07) |
 | Same serving query on **Standard WH** (the in-app A/B toggle) | — | **295ms p50 / 872ms p95** (n=30) → Interactive ~2.3× faster p50, ~5.8× faster p95 |
 | Streamlit full-script rerun | **1646ms p50 / 3391ms p95** *(historical, n=88 bursts, parent demo, 2026-05-19)* | n/a |
-| **Click → tile acknowledgment paint** | ~1646ms (full rerun) | **~10ms** (RAF×2 paint, measured live in-browser, ~165× faster) |
+| **Click → optimistic row visible** | ~1646ms (rerun must finish first) | **~0.4s** (click pipeline + ~10ms render step, measured live) → **~4× faster to see the row** |
+| React render/paint step (one row) | (part of the 1646ms rerun) | **~10ms** (RAF×2, measured live in-browser) — a render step, *not* a 1:1 comparison against a full rerun |
 | Click → tape-row-visible (tape refresh) | ~1646ms (rerun completes, all rows redrawn) | ~2400ms (1.5s polling + ~800ms fetch + ~50ms reconcile) |
 | Cortex Agent Q&A | 5-15s | 5-15s (unchanged) |
 
@@ -48,18 +49,19 @@ The latency table below mixes three number sources — live in-browser measureme
 - **Re-benchmarked 2026-07-07 on the live `aws_spcs` account (current interactive-`RAW_EVENTS` architecture):** the Interactive-vs-Standard warehouse rows above (book-rollup serving query, 30× per WH, server-side `TOTAL_ELAPSED_TIME` via `QUERY_HISTORY_BY_SESSION`). Constants live in `web/src/lib/baseline.ts` → `REACT_FORK_SERVING_MS`.
 - **Historical stored baseline (NOT re-measured live):** all Streamlit figures (`1646/3391ms` rerun; `60/95ms` and `98/241ms` per-WH profiles) were measured 2026-05-19 on the parent Streamlit-on-Snowflake demo, on a **different account** and the **old architecture**. The parent demo is not deployed on this account (a 30-day `QUERY_HISTORY` scan for `STPLATSTREAMLIT*` returned zero rows), so they cannot be refreshed here. They're an illustrative comparison, clearly labeled as such in the app.
 
-**Honest read:** Streamlit's full-script rerun is the dominant cost — 1.6 s typical, 3.4 s p95 (historical baseline). The React fork wins decisively on click-acknowledgment paint (single-row optimistic feedback, measured live) and is comparable on full tape-refresh latency. On the interactive-vs-standard warehouse comparison, the Interactive WH is ~2.3× faster at p50 and ~5.8× faster at p95 for the identical serving query — measured fresh on the current architecture.
+**Honest read:** Streamlit's full-script rerun is the dominant cost — 1.6 s typical, 3.4 s p95 (historical baseline). The React fork's genuine win is that the just-fired row **appears optimistically in ~0.4 s vs Streamlit's ~1.6 s rerun (~4× faster to see the row)**; the React render/paint step itself is ~10 ms — a render step, not a fair 1:1 against a full rerun. On full-dashboard data freshness the two are comparable, and React additionally stays fresh between clicks (1.5 s polling) while Streamlit goes stale until the next rerun. On the interactive-vs-standard warehouse comparison, the Interactive WH is ~2.3× faster at p50 and ~5.8× faster at p95 for the identical serving query — measured fresh on the current architecture.
 
 ## Target latency budget
 
 | Segment | Target | How |
 |---|---|---|
-| Click → optimistic acknowledgment paint | <50ms | React state diff + RAF×2 paint, no DB round-trip |
+| React render/paint step (after POST returns) | <50ms | React state diff + RAF×2 paint of the optimistic row |
+| Click → optimistic row visible | ~0.4s | Click pipeline (net + SDK + flush) + the ~10ms render step |
 | Click → row queryable from any connection | ~150-300ms | EAI to VM tunnel + SDK `wait_for_flush` |
 | Click → row visible in tape (polling cadence) | ~2400ms | Server-side 1.5s polling, full snapshot fetch, Zustand reconcile |
 | React tile re-render (memo'd diff) | <16ms | `React.memo` per slice, no full-page rerun |
 
-**Click → optimistic acknowledgment paint p50: <50 ms (typical 8-15 ms measured live).**
+**React render/paint step p50: <50 ms (typical 8-15 ms measured live). Click → optimistic row visible ≈ ~0.4 s (click pipeline + render step).**
 
 ## What this demo proves
 
@@ -440,13 +442,13 @@ At a typical effective enterprise rate (~$2/credit) this demo idle costs roughly
 |---|---|---|
 | 0:00 | Open dashboard | 62-position book loads instantly (WS connected, initial snapshot pushed) |
 | 0:30 | Point at the architecture | "Same HPA pipeline as before — the only change is what renders the data" |
-| 1:00 | Click **TRADE** | Latency timeline shows ~50ms total (optimistic ack). Tile flashes grey→green in <100ms |
-| 2:00 | Click 5x rapidly | All 5 bars appear instantly. Each <100ms. "That's the React diff — no full-page rerun" |
+| 1:00 | Click **TRADE** | Latency timeline breaks down the round trip (net + SDK + flush). Optimistic row appears grey in ~0.4s, then goes green when the IT confirms; the React render step is ~10ms |
+| 2:00 | Click 5x rapidly | All 5 bars stack. Each render/diff is a few ms; rows appear optimistically in well under half a second. "That's the React diff — no full-page rerun" |
 | 3:00 | Open parent fork in adjacent tab | Click the trade button there. Watch the 1.6-3.4s rerun. "Same data, same HPA commit — different framework" |
 | 4:00 | Switch back to React fork | "That's the A/B. Everything Snowflake-side was already sub-second." |
 | 5:00 | Switch to **Ask the Book** tab | "What is today's P&L by sector?" — Cortex Agent streams tokens via SSE |
 | 6:00 | Fuzzy search | "Show me Apollo's exposure" — same Agent, same Search service |
-| 7:00 | The closer | Click TRADE in the Live Credit Desk tab, switch to Ask the Book and ask "What was our most recent trade?" — same row, visible in <100 ms on the tile and findable by the Agent in 5-10 s |
+| 7:00 | The closer | Click TRADE in the Live Credit Desk tab, switch to Ask the Book and ask "What was our most recent trade?" — same row, shown optimistically on the tile in ~0.4s and findable by the Agent in 5-10 s |
 
 The Live Credit Desk tab also has **MARK** and **CREDIT** buttons next to TRADE for mark-to-market price updates and credit events (rating changes, defaults, restructurings).
 

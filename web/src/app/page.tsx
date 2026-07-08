@@ -198,10 +198,10 @@ export default function LiveDeskPage() {
       const t0 = performance.now();
       // Apples-to-apples render measurement starts HERE (snapshot fetch start),
       // matching Streamlit's burst span (rerun start → DOM painted).
-      // Streamlit's 2519 ms includes 12 sequential SQL queries + Python script
-      // + Plotly + DOM + paint. To compare scope-for-scope, our number must
-      // also include the fetch + queries + parse + render + paint, NOT just
-      // the post-data render+paint.
+      // Streamlit's ~1646 ms p50 rerun includes 12 sequential SQL queries +
+      // Python script + Plotly + DOM + paint. To compare scope-for-scope, our
+      // number must also include the fetch + queries + parse + render + paint,
+      // NOT just the post-data render+paint.
       const tApplesToApplesStart = t0;
       try {
         const endpoint = warehouseMode === "standard"
@@ -239,7 +239,7 @@ export default function LiveDeskPage() {
         // DayMetrics, charts) have committed and the browser has painted.
         // Span: fetch start → DOM painted (matches Streamlit's burst span:
         // rerun start → DOM painted). Includes queries, network, parse,
-        // render, paint — all four of those are also inside Streamlit's 2519 ms.
+        // render, paint — all four of those are also inside Streamlit's ~1646 ms.
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
             const fullPaintMs = performance.now() - tApplesToApplesStart;
@@ -600,7 +600,7 @@ export default function LiveDeskPage() {
             </table>
             <p className="mt-3 text-slate-400">
               <strong>Why segment 5 matters:</strong> The Streamlit version of this demo intentionally hides
-              render time because the full-script-rerun is 3-5 s and dominates the chart. React renders
+              render time because the full-script-rerun is ~1.6 s (up to 3.4 s p95) and dominates the chart. React renders
               the diff in one paint cycle, so we show it. That&apos;s the whole point of this fork.
             </p>
           </div>
