@@ -4,7 +4,7 @@
  * More reliable inside SPCS than snowflake-sdk's Node driver.
  */
 import { readFileSync, existsSync } from "fs";
-import { APP_DB, APP_SCHEMA, APP_FQN, INTERACTIVE_WH } from "./config";
+import { APP_DB, APP_SCHEMA, APP_FQN, INTERACTIVE_WH, STANDARD_WH } from "./config";
 
 // Row payload from Snowflake REST API has dynamic shape per query.
 export type Row = Record<string, any>;
@@ -131,8 +131,11 @@ export async function executeQuery(sql: string, opts?: ExecuteQueryOptions): Pro
 
 export async function loadAppConfig(): Promise<Record<string, string>> {
   try {
+    // APP_CONFIG is a standard table — read it on the standard WH. The default
+    // (interactive) warehouse can only query interactive tables.
     const rows = await executeQuery(
-      `SELECT KEY, VALUE FROM ${APP_FQN}.APP_CONFIG`
+      `SELECT KEY, VALUE FROM ${APP_FQN}.APP_CONFIG`,
+      { warehouse: STANDARD_WH }
     );
     const cfg: Record<string, string> = {};
     for (const row of rows) {

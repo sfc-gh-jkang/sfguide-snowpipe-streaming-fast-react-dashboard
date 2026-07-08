@@ -16,6 +16,7 @@ import {
   STREAMLIT_RENDER_MS,
   STREAMLIT_QUERY_PROFILE_MS,
   STREAMLIT_QUERIES_PER_RERUN,
+  REACT_FORK_SERVING_MS,
 } from "@/lib/baseline";
 import { POLL_WAIT_AVG_MS, PUBLIC_INTERACTIVE_WH, PUBLIC_STANDARD_WH } from "@/lib/constants";
 
@@ -1025,6 +1026,13 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
             <p className="font-semibold text-slate-200 mb-1">
               Streamlit rerun: direct burst-clustering measurement
             </p>
+            <p className="mb-1 rounded bg-amber-950/40 border border-amber-800/40 px-2 py-1 text-amber-200">
+              STORED HISTORICAL BASELINE — measured 2026-05-19 on the parent
+              Streamlit demo (different account, old architecture). It is{" "}
+              <strong>not</strong> re-measured live in this app; the parent
+              Streamlit demo is not deployed on this account. The React bars on
+              the chart above ARE measured live this session.
+            </p>
             <p>
               Each Streamlit rerun appears in <code>QUERY_HISTORY</code> as a
               tight burst of 8-20 queries from a <code>STPLATSTREAMLIT*</code>{" "}
@@ -1042,7 +1050,7 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
                 </tr>
                 <tr>
                   <td className="pr-4">bursts observed (n)</td>
-                  <td><strong>88</strong> (last 7 days)</td>
+                  <td><strong>88</strong> (parent demo, 2026-05-19)</td>
                 </tr>
                 <tr>
                   <td className="pr-4">p50 (typical) rerun</td>
@@ -1061,7 +1069,8 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
           </div>
           <div>
             <p className="font-semibold text-slate-200 mb-1">
-              Per-warehouse single-query timings (for context)
+              Interactive vs Standard WH — same serving query (re-benchmarked{" "}
+              {REACT_FORK_SERVING_MS.measurement_window})
             </p>
             <table className="mt-1 text-xs border-collapse">
               <tbody>
@@ -1073,25 +1082,37 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
                 </tr>
                 <tr>
                   <td className="pr-4"><code>{PUBLIC_INTERACTIVE_WH}</code></td>
-                  <td className="pr-4">{STREAMLIT_QUERY_PROFILE_MS.int_wh.n.toLocaleString()}</td>
-                  <td className="pr-4">{STREAMLIT_QUERY_PROFILE_MS.int_wh.p50} ms</td>
-                  <td>{STREAMLIT_QUERY_PROFILE_MS.int_wh.p95} ms</td>
+                  <td className="pr-4">{REACT_FORK_SERVING_MS.int_wh.n}</td>
+                  <td className="pr-4">{REACT_FORK_SERVING_MS.int_wh.p50} ms</td>
+                  <td>{REACT_FORK_SERVING_MS.int_wh.p95} ms</td>
                 </tr>
                 <tr>
                   <td className="pr-4"><code>{PUBLIC_STANDARD_WH}</code></td>
-                  <td className="pr-4">{STREAMLIT_QUERY_PROFILE_MS.std_wh.n.toLocaleString()}</td>
-                  <td className="pr-4">{STREAMLIT_QUERY_PROFILE_MS.std_wh.p50} ms</td>
-                  <td>{STREAMLIT_QUERY_PROFILE_MS.std_wh.p95} ms</td>
+                  <td className="pr-4">{REACT_FORK_SERVING_MS.std_wh.n}</td>
+                  <td className="pr-4">{REACT_FORK_SERVING_MS.std_wh.p50} ms</td>
+                  <td>{REACT_FORK_SERVING_MS.std_wh.p95} ms</td>
                 </tr>
               </tbody>
             </table>
             <p className="mt-1 text-slate-400">
-              Parent <code>app.py</code> issues{" "}
-              {STREAMLIT_QUERIES_PER_RERUN.total} queries per rerun (
-              {STREAMLIT_QUERIES_PER_RERUN.int_wh} on INT_WH +{" "}
-              {STREAMLIT_QUERIES_PER_RERUN.std_wh} on STD_WH), verified by
-              reading parent source. No <code>@st.cache_data</code>; every
-              rerun re-executes all queries.
+              This fork&apos;s book-rollup serving query (aggregated at query time
+              over the <code>RAW_EVENTS</code> interactive table), 30× per WH,
+              server-side <code>TOTAL_ELAPSED_TIME</code>. Interactive is ~2.3×
+              faster at p50 and ~5.8× faster at p95 for the identical query. The
+              live <strong>WH toggle</strong> above measures your own round-trips
+              in real time.
+            </p>
+            <p className="mt-2 text-slate-500">
+              For context, the parent Streamlit demo&apos;s historical per-WH
+              single-query profile (2026-05-19, different account, old
+              architecture — <em>not</em> re-measured live): INT{" "}
+              {STREAMLIT_QUERY_PROFILE_MS.int_wh.p50}/{STREAMLIT_QUERY_PROFILE_MS.int_wh.p95} ms
+              (n={STREAMLIT_QUERY_PROFILE_MS.int_wh.n.toLocaleString()}), STD{" "}
+              {STREAMLIT_QUERY_PROFILE_MS.std_wh.p50}/{STREAMLIT_QUERY_PROFILE_MS.std_wh.p95} ms
+              (n={STREAMLIT_QUERY_PROFILE_MS.std_wh.n.toLocaleString()}). That was a
+              simple single-row lookup, not this fork&apos;s query-time rollup.
+              Parent <code>app.py</code> issued {STREAMLIT_QUERIES_PER_RERUN.total}{" "}
+              queries per rerun; no <code>@st.cache_data</code>.
             </p>
           </div>
           <div>

@@ -91,7 +91,7 @@ export function LiveTape() {
           {/* Time-travel buttons */}
           <div
             className="flex items-center gap-1"
-            title="Replay the dashboard at a past point in time. Pauses live polling and queries PORTFOLIO_LIVE / RAW_EVENTS WHERE INGESTED_TS <= NOW() - <offset>. 'Now' resumes live mode. Useful for showing 'where the book was 30 s / 1 min / 5 min ago' without losing position. Powered by Snowflake Time Travel + standard timestamp filtering — no extra storage cost."
+            title="Replay the dashboard at a past point in time. Pauses live polling and queries RAW_EVENTS AT(OFFSET => -<seconds>) using Snowflake Time Travel (Interactive Tables support Time Travel even under continuous streaming writes). 'Now' resumes live mode. Useful for showing 'where the book was 30 s / 1 min / 5 min ago' without losing position — no extra storage cost."
           >
             <span className="text-[10px] text-slate-500 mr-1 cursor-help">Time travel ⓘ</span>
             {TIME_TRAVEL_OPTIONS.map((opt) => (

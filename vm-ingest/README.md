@@ -56,10 +56,9 @@ Set via `INGEST_API_KEY` env var in docker-compose.yml.
 
 ## Snowflake Objects
 
-- Table: `SNOWFLAKE_EXAMPLE.CREDIT_DEMO.RAW_EVENTS`
+- Interactive Table: `SNOWFLAKE_EXAMPLE.CREDIT_DEMO.RAW_EVENTS` (Snowpipe Streaming writes directly into it; the dashboard serves from it — no separate rollup table)
 - Pipe: `RAW_EVENTS-STREAMING` (auto-created by SDK)
 - Service user: `CREDIT_INGEST_USR` (keypair auth)
-- Interactive Table: `PORTFOLIO_LIVE` (TARGET_LAG=1 min, refreshes from RAW_EVENTS)
 
 ## Containers
 

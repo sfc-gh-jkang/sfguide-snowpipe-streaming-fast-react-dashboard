@@ -3,193 +3,153 @@
  */
 
 /**
- * Tests for queries.ts — verify SQL strings match parent fork's queries.py.
- * Compares normalized SQL (whitespace-collapsed) to ensure semantic identity.
+ * Tests for queries.ts.
+ *
+ * These queries were rewritten to read the RAW_EVENTS *interactive table*
+ * directly and aggregate the position book at query time (no PORTFOLIO_LIVE
+ * rollup table, no PORTFOLIO_LIVE_VIEW). We assert the structural contract —
+ * source object, output aliases, filters — rather than byte-for-byte SQL, so
+ * the tests stay meaningful as the SQL is tuned.
  */
 
 import * as queries from "../../src/server/queries";
 
-// Normalize SQL: collapse all whitespace sequences to single space, trim
 function normalize(sql: string): string {
   return sql.replace(/\s+/g, " ").trim();
 }
 
-// Expected SQL from parent fork's queries.py (normalized)
 const SCHEMA = "SNOWFLAKE_EXAMPLE.CREDIT_DEMO";
 
-describe("queries.ts matches parent fork queries.py", () => {
-  it("tape_query matches", () => {
-    const expected = normalize(`
-      SELECT
-        e.EVENT_ID,
-        e.INGESTED_TS,
-        e.EVENT_TYPE,
-        e.POSITION_ID,
-        p.ISSUER,
-        p.SECTOR,
-        GREATEST(0, TIMESTAMPDIFF('second', e.EVENT_TS, SYSDATE())) AS AGE_SEC,
-        COALESCE(e.SIDE, '') AS SIDE,
-        COALESCE(e.QTY, 0) AS QTY,
-        e.PRICE,
-        e.PREV_MARK,
-        e.NEW_MARK,
-        COALESCE(e.FROM_RATING, '') AS FROM_RATING,
-        COALESCE(e.TO_RATING, '') AS TO_RATING,
-        COALESCE(e.COUNTERPARTY, '') AS COUNTERPARTY,
-        COALESCE(e.SOURCE_APP, '') AS SOURCE_APP
-      FROM ${SCHEMA}.RAW_EVENTS e
-      LEFT JOIN ${SCHEMA}.POSITIONS_DIM p USING (POSITION_ID)
-      WHERE COALESCE(e.SOURCE_APP, '') != 'warmup'
-      ORDER BY e.EVENT_TS DESC
-      LIMIT 30
-    `);
-    expect(normalize(queries.tape_query(30))).toBe(expected);
+// Every rollup tile query + its time-travel variant.
+const ROLLUP_QUERIES: Array<[string, string]> = [
+  ["pnl_today", queries.pnl_today()],
+  ["sector_exposure", queries.sector_exposure()],
+  ["top_marks", queries.top_marks(10)],
+  ["watchlist", queries.watchlist()],
+  ["pnl_today_at", queries.pnl_today_at(null)],
+  ["sector_exposure_at", queries.sector_exposure_at(null)],
+  ["top_marks_at", queries.top_marks_at(null, 10)],
+  ["watchlist_at", queries.watchlist_at(null)],
+];
+
+// Everything the dashboard executes.
+const ALL_QUERIES: Array<[string, string]> = [
+  ...ROLLUP_QUERIES,
+  ["tape_query", queries.tape_query(30)],
+  ["hourly_trades", queries.hourly_trades()],
+  ["event_count", queries.event_count()],
+  ["ingest_latency_stats", queries.ingest_latency_stats(5)],
+  ["interactive_table_lag", queries.interactive_table_lag()],
+  ["throughput", queries.throughput(5)],
+  ["day_metrics", queries.day_metrics()],
+  ["tape_query_at", queries.tape_query_at(60)],
+  ["day_metrics_at", queries.day_metrics_at(60)],
+];
+
+describe("queries.ts — interactive RAW_EVENTS source", () => {
+  it("no query references the retired PORTFOLIO_LIVE table or view", () => {
+    for (const [name, sql] of ALL_QUERIES) {
+      expect(`${name}:${sql}`).not.toMatch(/PORTFOLIO_LIVE/);
+    }
   });
 
-  it("pnl_today matches", () => {
-    const expected = normalize(`
-      SELECT
-        ROUND(SUM(PNL_TODAY), 2) AS TOTAL_PNL,
-        COUNT(*) AS POSITION_COUNT,
-        SUM(CASE WHEN PNL_TODAY > 0 THEN 1 ELSE 0 END) AS GAINERS,
-        SUM(CASE WHEN PNL_TODAY < 0 THEN 1 ELSE 0 END) AS LOSERS
-      FROM ${SCHEMA}.PORTFOLIO_LIVE_VIEW
-    `);
-    expect(normalize(queries.pnl_today())).toBe(expected);
+  it("every query reads from RAW_EVENTS", () => {
+    for (const [name, sql] of ALL_QUERIES) {
+      expect(`${name}:${sql}`).toContain(`${SCHEMA}.RAW_EVENTS`);
+    }
   });
 
-  it("sector_exposure matches", () => {
-    const expected = normalize(`
-      SELECT
-        SECTOR,
-        ROUND(SUM(PAR_AMOUNT), 0) AS TOTAL_PAR,
-        ROUND(SUM(PAR_AMOUNT) / NULLIF(SUM(SUM(PAR_AMOUNT)) OVER (), 0) * 100, 1) AS PCT
-      FROM ${SCHEMA}.PORTFOLIO_LIVE_VIEW
-      GROUP BY SECTOR
-      ORDER BY TOTAL_PAR DESC
-    `);
-    expect(normalize(queries.sector_exposure())).toBe(expected);
-  });
-
-  it("top_marks matches", () => {
-    const expected = normalize(`
-      SELECT
-        POSITION_ID,
-        ISSUER,
-        SECTOR,
-        TRANCHE,
-        CURRENT_MARK,
-        ROUND(MARK_CHANGE_BPS, 1) AS MARK_CHANGE_BPS,
-        ROUND(PNL_TODAY, 0) AS PNL_TODAY,
-        FUND
-      FROM ${SCHEMA}.PORTFOLIO_LIVE_VIEW
-      ORDER BY ABS(MARK_CHANGE_BPS) DESC
-      LIMIT 10
-    `);
-    expect(normalize(queries.top_marks(10))).toBe(expected);
-  });
-
-  it("watchlist matches", () => {
-    const expected = normalize(`
-      SELECT
-        POSITION_ID,
-        ISSUER,
-        RATING,
-        SECTOR,
-        ROUND(PAR_AMOUNT, 0) AS PAR_AMOUNT,
-        CURRENT_MARK,
-        ROUND(PNL_TODAY, 0) AS PNL_TODAY
-      FROM ${SCHEMA}.PORTFOLIO_LIVE_VIEW
-      WHERE WATCHLIST = TRUE
-      ORDER BY PNL_TODAY ASC
-    `);
-    expect(normalize(queries.watchlist())).toBe(expected);
-  });
-
-  it("hourly_trades matches", () => {
-    const expected = normalize(`
-      SELECT
-        DATE_TRUNC('hour', EVENT_TS) AS HOUR,
-        COUNT(*) AS TRADE_COUNT
-      FROM ${SCHEMA}.RAW_EVENTS
-      WHERE EVENT_TYPE = 'TRADE'
-        AND EVENT_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-      GROUP BY 1
-      ORDER BY 1
-    `);
-    expect(normalize(queries.hourly_trades())).toBe(expected);
-  });
-
-  it("event_count matches", () => {
-    const expected = normalize(`
-      SELECT COUNT(*) AS CNT
-      FROM ${SCHEMA}.RAW_EVENTS
-      WHERE EVENT_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-    `);
-    expect(normalize(queries.event_count())).toBe(expected);
-  });
-
-  it("ingest_latency_stats matches", () => {
-    const expected = normalize(`
-      SELECT
-        COUNT(*) AS EVENT_COUNT,
-        ROUND(APPROX_PERCENTILE(
-            GREATEST(0, TIMESTAMPDIFF('second', EVENT_TS, SYSDATE())), 0.5
-        ), 1) AS P50_MS,
-        ROUND(APPROX_PERCENTILE(
-            GREATEST(0, TIMESTAMPDIFF('second', EVENT_TS, SYSDATE())), 0.95
-        ), 1) AS P95_MS,
-        ROUND(APPROX_PERCENTILE(
-            GREATEST(0, TIMESTAMPDIFF('second', EVENT_TS, SYSDATE())), 0.99
-        ), 1) AS P99_MS
-      FROM ${SCHEMA}.RAW_EVENTS
-      WHERE EVENT_TS >= DATEADD('minute', -5, SYSDATE())
-        AND COALESCE(SOURCE_APP, '') != 'warmup'
-    `);
-    expect(normalize(queries.ingest_latency_stats(5))).toBe(expected);
-  });
-
-  it("interactive_table_lag matches", () => {
-    const expected = normalize(`
-      SELECT
-        GREATEST(0, TIMESTAMPDIFF('second', MAX(LATEST_EVENT_TS), SYSDATE())) AS LAG_SECONDS
-      FROM ${SCHEMA}.PORTFOLIO_LIVE_VIEW
-    `);
-    expect(normalize(queries.interactive_table_lag())).toBe(expected);
-  });
-
-  it("throughput matches", () => {
-    const expected = normalize(`
-      SELECT
-        ROUND(COUNT(*) / GREATEST(5, 1), 1) AS EVENTS_PER_MIN
-      FROM ${SCHEMA}.RAW_EVENTS
-      WHERE EVENT_TS >= DATEADD('minute', -5, CURRENT_TIMESTAMP())
-    `);
-    expect(normalize(queries.throughput(5))).toBe(expected);
-  });
-
-  it("tape_query respects custom limit", () => {
-    const sql = queries.tape_query(50);
-    expect(sql).toContain("LIMIT 50");
-  });
-
-  it("top_marks respects custom n", () => {
-    const sql = queries.top_marks(20);
-    expect(sql).toContain("LIMIT 20");
+  it("no query joins POSITIONS_DIM (attributes are denormalized onto events)", () => {
+    for (const [name, sql] of ALL_QUERIES) {
+      expect(`${name}:${sql}`).not.toMatch(/POSITIONS_DIM/);
+    }
   });
 });
 
-describe("queries.ts regression guards", () => {
-  it("tape_query uses SYSDATE() not CURRENT_TIMESTAMP() for age calc (UTC clock-skew fix)", () => {
+describe("queries.ts — rollup book contract", () => {
+  it("rollup queries derive latest-per-position from the book CTE", () => {
+    for (const [name, sql] of ROLLUP_QUERIES) {
+      const n = normalize(sql);
+      expect(`${name}`).toBeTruthy();
+      expect(n).toContain("book AS");
+      expect(n).toContain("FROM book");
+      // latest-per-position is done with a window function, not a dim join.
+      expect(n).toContain("ROW_NUMBER() OVER (PARTITION BY POSITION_ID");
+    }
+  });
+
+  it("pnl_today aggregates PnL with the expected KPI aliases", () => {
+    const n = normalize(queries.pnl_today());
+    expect(n).toContain("SUM(PNL_TODAY)");
+    expect(n).toMatch(/AS TOTAL_PNL/);
+    expect(n).toMatch(/AS POSITION_COUNT/);
+    expect(n).toMatch(/AS GAINERS/);
+    expect(n).toMatch(/AS LOSERS/);
+  });
+
+  it("sector_exposure groups by SECTOR and emits TOTAL_PAR + PCT", () => {
+    const n = normalize(queries.sector_exposure());
+    expect(n).toContain("GROUP BY SECTOR");
+    expect(n).toMatch(/AS TOTAL_PAR/);
+    expect(n).toMatch(/AS PCT/);
+  });
+
+  it("top_marks exposes CURRENT_MARK and honors the row limit", () => {
+    expect(queries.top_marks(20)).toContain("LIMIT 20");
+    const n = normalize(queries.top_marks(10));
+    expect(n).toContain("CURRENT_MARK");
+    expect(n).toContain("MARK_CHANGE_BPS");
+    expect(n).toContain("ORDER BY ABS(MARK_CHANGE_BPS) DESC");
+  });
+
+  it("watchlist filters WATCHLIST = TRUE and exposes RATING + CURRENT_MARK", () => {
+    const n = normalize(queries.watchlist());
+    expect(n).toContain("WHERE WATCHLIST = TRUE");
+    expect(n).toContain("RATING");
+    expect(n).toContain("CURRENT_MARK");
+  });
+});
+
+describe("queries.ts — tape + freshness", () => {
+  it("tape_query selects denormalized ISSUER/SECTOR without a join and excludes internal events", () => {
+    const n = normalize(queries.tape_query(30));
+    expect(n).toContain("e.ISSUER");
+    expect(n).toContain("e.SECTOR");
+    expect(n).toContain("NOT IN ('warmup', 'seed')");
+    expect(n).toMatch(/ORDER BY .+ DESC LIMIT 30/);
+  });
+
+  it("tape_query uses SYSDATE() (not CURRENT_TIMESTAMP()) for age calc (UTC clock-skew fix)", () => {
     const sql = queries.tape_query();
     expect(sql).toContain("SYSDATE()");
-    // The age calculation must NOT use CURRENT_TIMESTAMP() — it returns LTZ
-    // which produced negative ages (-24264s) when EVENT_TS was UTC walltime.
     expect(sql).not.toMatch(/CURRENT_TIMESTAMP\(\).*AGE_SEC/s);
   });
 
-  it("tape_query has ORDER BY ... DESC LIMIT clause", () => {
-    const sql = normalize(queries.tape_query(30));
-    expect(sql).toMatch(/ORDER BY .+ DESC LIMIT 30/);
+  it("interactive_table_lag reports LAG_SECONDS from RAW_EVENTS", () => {
+    const n = normalize(queries.interactive_table_lag());
+    expect(n).toContain("AS LAG_SECONDS");
+    expect(n).toContain("MAX(EVENT_TS)");
+  });
+
+  it("day_metrics + ingest_latency_stats exclude warmup and seed events", () => {
+    expect(normalize(queries.day_metrics())).toContain("NOT IN ('warmup', 'seed')");
+    expect(normalize(queries.ingest_latency_stats(5))).toContain(
+      "NOT IN ('warmup', 'seed')"
+    );
+  });
+});
+
+describe("queries.ts — time-travel variants", () => {
+  it("append AT(OFFSET => -N) to RAW_EVENTS when a positive offset is given", () => {
+    expect(queries.tape_query_at(120)).toContain("AT(OFFSET => -120)");
+    expect(queries.pnl_today_at(300)).toContain("AT(OFFSET => -300)");
+    expect(queries.top_marks_at(90, 10)).toContain("AT(OFFSET => -90)");
+    expect(queries.day_metrics_at(45)).toContain("AT(OFFSET => -45)");
+  });
+
+  it("omit the time-travel clause for null / non-positive offsets (live mode)", () => {
+    expect(queries.tape_query_at(null)).not.toContain("AT(OFFSET");
+    expect(queries.pnl_today_at(0)).not.toContain("AT(OFFSET");
+    expect(queries.sector_exposure_at(null)).not.toContain("AT(OFFSET");
   });
 });

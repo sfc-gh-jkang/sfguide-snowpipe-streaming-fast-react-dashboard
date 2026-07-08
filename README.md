@@ -6,7 +6,7 @@
 
 A real-time credit-trading dashboard. Operators on a credit desk fire trades, marks, and credit events; rows commit to Snowflake via Snowpipe Streaming HPA in ~30 ms; the dashboard shows the trade tape, P&L, sector exposure, top marks, watchlist, and a Cortex Agent chat that answers questions about the position book.
 
-> Snowpipe Streaming **HPA** + **Interactive Tables** + **Cortex Agent** + **Next.js on SPCS** — same data pipeline as the parent fork, but with **~10 ms click-acknowledgment paint** vs Streamlit's ~1.6 s full-script rerun (directly measured).
+> Snowpipe Streaming **HPA** + **Interactive Tables** + **Cortex Agent** + **Next.js on SPCS** — same data pipeline as the parent fork, but with **~10 ms click-acknowledgment paint** (measured live in-browser) vs Streamlit's ~1.6 s full-script rerun (historical baseline from the parent demo — see provenance note below).
 
 This is a performance fork of the parent demo `sfguide-snowpipe-streaming-interactive-demo` (Streamlit-on-Snowflake). The VM producer, the HPA SDK ingest path, the Interactive Tables, and the Cortex Agent spec are unchanged. The presentation layer is what's different: Streamlit on Snowflake is replaced by a Next.js 14 React app on SPCS, served behind Snowsight's OAuth gate. Tile updates run on a 200 ms server-side polling loop with WebSocket diff-push to the browser; full-snapshot fetches run client-side every 1.5 s as a periodic truth source.
 
@@ -31,18 +31,24 @@ What you see when you run this demo:
 
 ## Why this fork exists
 
-The parent demo's honest latency table told the story (numbers replaced 2026-05-19 with directly measured QUERY_HISTORY data — see `web/src/lib/baseline.ts` for the SQL):
+The latency table below mixes three number sources — live in-browser measurements, a 2026-07-07 re-benchmark of this fork's serving queries on the current architecture, and a historical Streamlit baseline. Each row is labeled, and the **Number provenance** note under the table spells out exactly what is measured live vs stored (see also `web/src/lib/baseline.ts`):
 
 | Segment | Parent (Streamlit) | This fork (React) |
 |---|---|---|
 | HPA `wait_for_flush()` commit | ~30ms | ~30ms (unchanged) |
-| Single-query roundtrip on Interactive WH | **60ms p50, 95ms p95** (n=8,795 measured) | ~228ms p50 via SQL REST API (n=2,965) |
-| Streamlit full-script rerun | **1646ms p50, 3391ms p95** (n=88 bursts measured) | n/a |
-| **Click → tile acknowledgment paint** | **~1646ms** (full rerun) | **~10ms** (RAF×2 paint, ~165× faster) |
+| Serving-query server-side time on **Interactive WH** | 60ms p50 / 95ms p95 *(historical: old single-row lookup, parent demo, 2026-05-19)* | **130ms p50 / 151ms p95** (n=30, book rollup, re-benchmarked 2026-07-07) |
+| Same serving query on **Standard WH** (the in-app A/B toggle) | — | **295ms p50 / 872ms p95** (n=30) → Interactive ~2.3× faster p50, ~5.8× faster p95 |
+| Streamlit full-script rerun | **1646ms p50 / 3391ms p95** *(historical, n=88 bursts, parent demo, 2026-05-19)* | n/a |
+| **Click → tile acknowledgment paint** | ~1646ms (full rerun) | **~10ms** (RAF×2 paint, measured live in-browser, ~165× faster) |
 | Click → tape-row-visible (tape refresh) | ~1646ms (rerun completes, all rows redrawn) | ~2400ms (1.5s polling + ~800ms fetch + ~50ms reconcile) |
 | Cortex Agent Q&A | 5-15s | 5-15s (unchanged) |
 
-**Honest read:** Streamlit's full-script rerun is the dominant cost — 1.6 s typical, 3.4 s p95. The React fork wins decisively on click-acknowledgment paint (single-row optimistic feedback) and is comparable on full tape-refresh latency. The fork is faster where it matters for interactive demos (instant click feedback) and equivalent where the architectures converge (eventual consistency of the full dashboard view).
+**Number provenance (important — don't conflate these):**
+- **Live-measured, this fork, this session:** click→paint, network round-trip, HPA flush, IT-poll, WebSocket wire-delivery, render. These are timed in your browser on every click and shown labeled `MEASURED n=…` in the in-app Latency panel.
+- **Re-benchmarked 2026-07-07 on the live `aws_spcs` account (current interactive-`RAW_EVENTS` architecture):** the Interactive-vs-Standard warehouse rows above (book-rollup serving query, 30× per WH, server-side `TOTAL_ELAPSED_TIME` via `QUERY_HISTORY_BY_SESSION`). Constants live in `web/src/lib/baseline.ts` → `REACT_FORK_SERVING_MS`.
+- **Historical stored baseline (NOT re-measured live):** all Streamlit figures (`1646/3391ms` rerun; `60/95ms` and `98/241ms` per-WH profiles) were measured 2026-05-19 on the parent Streamlit-on-Snowflake demo, on a **different account** and the **old architecture**. The parent demo is not deployed on this account (a 30-day `QUERY_HISTORY` scan for `STPLATSTREAMLIT*` returned zero rows), so they cannot be refreshed here. They're an illustrative comparison, clearly labeled as such in the app.
+
+**Honest read:** Streamlit's full-script rerun is the dominant cost — 1.6 s typical, 3.4 s p95 (historical baseline). The React fork wins decisively on click-acknowledgment paint (single-row optimistic feedback, measured live) and is comparable on full tape-refresh latency. On the interactive-vs-standard warehouse comparison, the Interactive WH is ~2.3× faster at p50 and ~5.8× faster at p95 for the identical serving query — measured fresh on the current architecture.
 
 ## Target latency budget
 
@@ -61,9 +67,9 @@ A 10-second scan of which Snowflake products this demo exercises and what each o
 
 | # | Snowflake product | What it does here | Why it matters |
 |---|---|---|---|
-| 1 | **Snowpipe Streaming HPA** (High-Performance Architecture) | Auto-PIPE ingest from a Python SDK to `RAW_EVENTS`. ~30 ms commit latency on `wait_for_flush()`. | One ingest path for both micro-batch and per-row streaming; no Kafka, no Connect, no schema registry |
-| 2 | **Interactive Tables** | `PORTFOLIO_LIVE` clustered by `(SECTOR, ISSUER)`, refreshed from `RAW_EVENTS` with TARGET_LAG=1m. Sub-second concurrent reads. | Replaces a Redis cache; same table is the system of record AND the hot serving layer |
-| 3 | **Interactive Warehouses** | `CREDIT_DEMO_INT_WH` stays warm to serve the 200 ms server-side polling reader. | No JVM, no watermarks, no state-store recovery — just a warehouse that doesn't suspend |
+| 1 | **Snowpipe Streaming HPA** (High-Performance Architecture) | Channel-API ingest from a Python SDK directly into `RAW_EVENTS` (an Interactive Table) via the auto-PIPE `RAW_EVENTS-STREAMING`. ~30 ms commit latency on `wait_for_flush()`. No landing table, no COPY INTO. | One ingest path for both micro-batch and per-row streaming; no Kafka, no Connect, no schema registry |
+| 2 | **Interactive Tables** | `RAW_EVENTS` is itself the Interactive Table — Snowpipe Streaming writes rows straight into it, and the dashboard serves every tile from it. Clustered by `(EVENT_TS)`; position attributes are denormalized onto each event so tile queries need no dimension join. Sub-second concurrent reads. | Replaces a Redis cache; the same table is the system of record AND the hot serving layer |
+| 3 | **Interactive Warehouses** | `CREDIT_DEMO_INT_WH` stays warm to serve the 200 ms server-side polling reader against `RAW_EVENTS`. | No JVM, no watermarks, no state-store recovery — just a warehouse that doesn't suspend |
 | 4 | **SPCS Snowflake App** | Hosts the Next.js 14 dashboard on a `CPU_X64_XS` compute pool. OAuth via `/snowflake/session/token`. | Bring-your-own-runtime UI, deployed with `snow app deploy`, no separate infra to operate |
 | 5 | **Cortex Agent** | `CREDIT_AGENT` orchestrates Cortex Analyst + Cortex Search to answer NL questions about the book. | Replaces a third-party text-to-SQL bot + BI semantic-model tier with one Snowflake-native object |
 | 6 | **Cortex Analyst (Semantic Views)** | `CREDIT_SV` defines tables, dimensions, measures, and metrics that the agent's analyst tool turns into SQL. | One semantic model owned alongside the data; no Looker LookML drift |
@@ -97,13 +103,15 @@ A 10-second scan of which Snowflake products this demo exercises and what each o
         ▼                                             ▼
    ┌─────────────────────────────────┐      ┌────────────────────┐
    │ Snowpipe Streaming HPA Auto-PIPE│      │  CREDIT_SV         │
-   └────────────────┬────────────────┘      │  Semantic View     │
-                    │                       │  + POSITIONS_SEARCH│
-                    ▼                       │  Cortex Search     │
+   │ (channel API → RAW_EVENTS)      │      │  Semantic View     │
+   │                                 │      │  + POSITIONS_SEARCH│
+   │                                 │      │  Cortex Search     │
    ┌──────────────────────────────────────┐ └─────────┬──────────┘
-   │ RAW_EVENTS   Interactive Table       │           │
-   │ POSITIONS_DIM   (62 loan positions)  │ ◄─────────┘
-   │ PORTFOLIO_LIVE  (Interactive Table)  │
+   │ RAW_EVENTS   (Interactive Table)     │           │
+   │   ← direct streaming target + serving│           │
+   │ POSITIONS_DIM (62 loan positions,    │ ◄─────────┘
+   │   standard dim; attrs denormalized   │
+   │   onto each event)                   │
    └────────────────┬─────────────────────┘
                     │
         ┌───────────┴────────────┐
@@ -134,9 +142,8 @@ flowchart TB
     CF["Cloudflare Tunnel"]
     VM["Producer VM<br/>FastAPI + 4-ch HPA SDK"]
     PIPE["Snowpipe Streaming HPA<br/>Auto-PIPE"]
-    RAW[("RAW_EVENTS<br/>Interactive Table")]
-    POS[("POSITIONS_DIM<br/>62 loan positions")]
-    PORT[("PORTFOLIO_LIVE<br/>Interactive Table")]
+    RAW[("RAW_EVENTS<br/>Interactive Table<br/>(streaming target + serving)")]
+    POS[("POSITIONS_DIM<br/>62 loan positions<br/>(standard dim)")]
     INTWH["Interactive Warehouse<br/>(stays warm)"]
     AGENT["CREDIT_AGENT<br/>(orchestrator)"]
     SV["CREDIT_SV<br/>Semantic View"]
@@ -154,7 +161,6 @@ flowchart TB
     %% Server-side reader → WS push (200ms diff)
     READER -.->|200ms poll| INTWH
     INTWH -.-> RAW
-    INTWH -.-> PORT
     READER -.->|hash + diff| WSB
     WSB -.->|WS push| Browser
 
@@ -174,7 +180,7 @@ flowchart TB
     classDef ext  fill:#F39C12,stroke:#B8740F,color:#fff,stroke-width:2px
     classDef ai   fill:#9B59B6,stroke:#6E3D81,color:#fff,stroke-width:2px
     classDef user fill:#34495E,stroke:#1A2530,color:#fff
-    class UI,WSB,READER,EAI,PIPE,RAW,POS,PORT,INTWH snow
+    class UI,WSB,READER,EAI,PIPE,RAW,POS,INTWH snow
     class CF,VM ext
     class AGENT,SV,SEARCH ai
     class Browser user
@@ -218,7 +224,7 @@ The other 15 identifiers in `.env.example` (database, schema, warehouse, role, p
 This is idempotent and does everything end-to-end:
 
 1. Renders `setup.sql`, `semantic_view.sql`, and `web/snowflake.yml` from your `.env`
-2. Runs `setup.sql` — creates database, schema, warehouses (standard + Interactive), roles (`DASHBOARD_RL`, `CREDIT_INGEST_RL`), compute pool, network rules, External Access Integration, `RAW_EVENTS` + `POSITIONS_DIM` + `PORTFOLIO_LIVE` tables, Cortex Search service, Cortex Agent, `APP_CONFIG` runtime table, and all grants
+2. Runs `setup.sql` — creates database, schema, warehouses (standard + Interactive), roles (`DASHBOARD_RL`, `CREDIT_INGEST_RL`), compute pool, network rules, External Access Integration, the `RAW_EVENTS` Interactive Table (streaming target + serving layer) + `POSITIONS_DIM`, Cortex Search service, Cortex Agent, `APP_CONFIG` runtime table, and all grants
 3. Runs `semantic_view.sql` — creates the `CREDIT_SV` semantic view used by the agent for text-to-SQL
 4. Pushes `INGEST_TUNNEL_HOST` + `INGEST_API_KEY` into `APP_CONFIG`
 5. Updates the EAI network rule to allow egress to your tunnel host
@@ -329,9 +335,8 @@ After `./deploy-app.sh --bootstrap` completes, your account contains the followi
 | Ingest role | `CREDIT_INGEST_RL` | `INGEST_ROLE` | Read/insert on `RAW_EVENTS`, CREATE PIPE on schema |
 | Dashboard role | `DASHBOARD_RL` | `DASHBOARD_ROLE` | Read-only on every demo object the dashboard touches |
 | Stage | `CREDIT_STAGE` | `INGEST_STAGE` | Internal stage for SPCS app artifacts |
-| Table | `RAW_EVENTS` | (fixed) | Standard table — Snowpipe Streaming HPA ingest target |
-| Table | `POSITIONS_DIM` | (fixed) | Reference dimension (62 loan positions) |
-| Interactive Table | `PORTFOLIO_LIVE` | (fixed) | `CLUSTER BY (SECTOR, ISSUER)`, TARGET_LAG=1m, refreshed by `STANDARD_WH` |
+| Interactive Table | `RAW_EVENTS` | (fixed) | `CREATE INTERACTIVE TABLE`, `CLUSTER BY (EVENT_TS)` — Snowpipe Streaming HPA writes directly into it; the dashboard serves every tile from it. Position attributes denormalized onto each event. |
+| Table | `POSITIONS_DIM` | (fixed) | Reference dimension (62 loan positions); seed source for the denormalized event attributes + Cortex Search |
 | App config table | `APP_CONFIG` | `APP_CONFIG_TABLE` | Holds `INGEST_TUNNEL_HOST` + `INGEST_API_KEY` at runtime |
 | Cortex Agent | `CREDIT_AGENT` | `AGENT_NAME` | Orchestrates analyst (text-to-SQL) + search tools |
 | Semantic View | `CREDIT_SEMANTIC_VIEW` | `SEMANTIC_VIEW_NAME` | Backs the agent's text-to-SQL tool |
@@ -453,7 +458,7 @@ Terms used throughout the README, in case you're not deep in the Snowflake stack
 |---|---|
 | **HPA** | High-Performance Architecture — Snowflake's GA Snowpipe Streaming engine. Sub-100 ms row commits via the Java/Python SDK. Replaces the older Snowpipe (file-based, minute-scale) for streaming workloads. |
 | **Auto-PIPE** | The named `PIPE` object the HPA SDK auto-creates the first time you open a channel against a table. Format: `<TABLE>-STREAMING`. You don't manage it directly. |
-| **Interactive Table** | A Snowflake table type (`CREATE INTERACTIVE TABLE`) optimized for sub-second concurrent reads, with `CLUSTER BY` clustering and `TARGET_LAG` auto-refresh. Same SQL surface as a regular table; different storage/serving engine. |
+| **Interactive Table** | A Snowflake table type (`CREATE INTERACTIVE TABLE`) optimized for sub-second concurrent reads, with `CLUSTER BY` clustering. Can be a **direct Snowpipe Streaming target** (rows appended via the channel API, as `RAW_EVENTS` is here) or auto-refreshed from a source with `TARGET_LAG`. Same SQL surface as a regular table; different storage/serving engine. Supports Time Travel even under continuous streaming writes. |
 | **Interactive Warehouse** | A warehouse SKU that stays warm to query Interactive Tables. XSMALL ≈ 0.6 credits/hour compute. Long `AUTO_SUSPEND` keeps it serving sub-second reads. |
 | **SPCS** | Snowpark Container Services — Snowflake's container hosting layer. Runs your Docker image on a `compute pool` you create. This dashboard runs on SPCS. |
 | **Snowflake App** | An SPCS deployment unit (`snow app deploy`). Bundles a `snowflake.yml` manifest + your code stage. Snowsight handles auth/routing for you (the dashboard is gated by Snowsight OAuth). |
@@ -473,7 +478,7 @@ If you've already deployed the parent Streamlit fork to the same account, you ca
 - `DASHBOARD_VM_EAI` (parent uses `CREDIT_INGEST_EAI`)
 - `DASHBOARD_RL` (parent's `CREDIT_INGEST_RL` is reused, not duplicated)
 
-The VM producer, `RAW_EVENTS`, `POSITIONS_DIM`, `PORTFOLIO_LIVE`, `CREDIT_AGENT`, and `CREDIT_SV` are shared. If you're starting from a fresh account with only this fork, you don't need to think about coexistence — `--bootstrap` creates everything from scratch.
+The VM producer, `RAW_EVENTS`, `POSITIONS_DIM`, `CREDIT_AGENT`, and `CREDIT_SV` are shared. If you're starting from a fresh account with only this fork, you don't need to think about coexistence — `--bootstrap` creates everything from scratch.
 
 ## Repository Owner
 

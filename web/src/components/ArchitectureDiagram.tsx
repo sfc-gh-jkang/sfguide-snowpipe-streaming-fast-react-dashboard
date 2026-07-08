@@ -71,25 +71,25 @@ export function ArchitectureDiagram() {
           <span>▼ FROM …</span>
         </div>
 
-        {/* Snowpipe → RAW_EVENTS (standard table) → PORTFOLIO_LIVE (Interactive Table) */}
+        {/* Snowpipe Streaming → RAW_EVENTS (Interactive Table) → serve directly */}
         <div className="col-span-12">
           <Node
             color="snow"
-            label="Snowpipe Streaming HPA → Auto-PIPE → RAW_EVENTS (standard table)"
-            sub="Raw event log; written by HPA SDK from VM producer"
+            label="Snowpipe Streaming HPA → Auto-PIPE → RAW_EVENTS (Interactive Table)"
+            sub="Channel API writes rows directly into the Interactive Table — no landing table, no COPY INTO"
             wide
           />
         </div>
 
         <div className="col-span-12 flex justify-center text-slate-500">
-          ▼ Auto-refresh
+          ▼ served directly (position book aggregated at query time)
         </div>
 
         <div className="col-span-12">
           <Node
             color="snow"
-            label="PORTFOLIO_LIVE (Interactive Table)"
-            sub="CLUSTER BY (SECTOR, ISSUER) · TARGET_LAG = 1 minute · concurrent sub-second reads"
+            label="RAW_EVENTS (Interactive Table)"
+            sub="CLUSTER BY (EVENT_TS) · position attrs denormalized onto each event · concurrent sub-second reads"
             wide
           />
         </div>

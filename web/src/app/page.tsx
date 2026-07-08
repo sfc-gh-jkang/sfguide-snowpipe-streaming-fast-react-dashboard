@@ -386,7 +386,7 @@ export default function LiveDeskPage() {
           {/* Warehouse toggle */}
           <span
             className="text-slate-500 cursor-help"
-            title={`Which Snowflake warehouse the snapshot route uses. INTERACTIVE = ${PUBLIC_INTERACTIVE_WH} (Interactive XSMALL, AUTO_SUSPEND=86400 i.e. 24 h, queries Interactive Tables for sub-second response, ~50-150 ms median). STANDARD = ${PUBLIC_STANDARD_WH} (Standard XSMALL, AUTO_SUSPEND=30 s, queries the same data via Dynamic-Table refresh, ~250-800 ms median, suspends fast = cold-start risk). Toggle to demo the Interactive vs Standard latency delta on the swim-lane chart.`}
+            title={`Which Snowflake warehouse the snapshot route uses. INTERACTIVE = ${PUBLIC_INTERACTIVE_WH} (Interactive XSMALL, AUTO_SUSPEND=86400 i.e. 24 h, queries the RAW_EVENTS Interactive Table with a warm SSD cache + pre-computed index for sub-second response, ~50-150 ms median). STANDARD = ${PUBLIC_STANDARD_WH} (Standard XSMALL, AUTO_SUSPEND=30 s, runs the exact same queries against the same Interactive Table but without the warm cache, ~250-800 ms median, suspends fast = cold-start risk). Toggle to demo the Interactive vs Standard latency delta on the swim-lane chart.`}
           >
             WH: ⓘ
           </span>
@@ -506,7 +506,7 @@ export default function LiveDeskPage() {
             </thead>
             <tbody className="divide-y divide-slate-800">
               <tr><td className="p-2">1</td><td className="p-2"><strong>Snowpipe Streaming HPA</strong> (GA Sept 2025)</td><td className="p-2">Sub-second row-level ingest with <code className="text-snow-blue">wait_for_flush()</code> for <strong className="text-emerald-300">{liveDocStats.flushLabel}</strong> commit acknowledgement (live median, n={liveDocStats.n})</td></tr>
-              <tr><td className="p-2">2</td><td className="p-2"><strong>Interactive Tables</strong></td><td className="p-2">Hot serving layer is <code>PORTFOLIO_LIVE</code> (Interactive Table, <code>CLUSTER BY (SECTOR, ISSUER)</code>) — Snowpipe Streaming writes raw events to <code>RAW_EVENTS</code>, the IT auto-refreshes from there. Replaces Redis.</td></tr>
+              <tr><td className="p-2">2</td><td className="p-2"><strong>Interactive Tables</strong></td><td className="p-2"><code>RAW_EVENTS</code> is itself the Interactive Table (<code>CLUSTER BY (EVENT_TS)</code>) — Snowpipe Streaming writes rows straight into it via the channel API, and every tile is served from it (aggregated at query time). Replaces Redis; same table is system of record AND hot serving layer.</td></tr>
               <tr><td className="p-2">3</td><td className="p-2"><strong>Interactive Warehouses</strong></td><td className="p-2">Dedicated compute SKU bound to Interactive Tables — sub-second concurrent reads</td></tr>
               <tr><td className="p-2">4</td><td className="p-2"><strong>Snowflake Apps Deploy</strong></td><td className="p-2">Next.js + WebSocket on SPCS — Snowsight-gated, OAuth via <code>/snowflake/session/token</code></td></tr>
               <tr><td className="p-2">5</td><td className="p-2"><strong>Cortex Agent</strong> (Analyst + Search)</td><td className="p-2">Natural-language Q&amp;A over the live book — {`"Show me Apollo's exposure"`}</td></tr>
@@ -641,7 +641,8 @@ export default function LiveDeskPage() {
                 </li>
                 <li>
                   <strong>Heavier query than the IT-poll (~300 – 800 ms):</strong> the tape query
-                  joins <code>RAW_EVENTS</code> with <code>POSITIONS_DIM</code>,
+                  reads <code>RAW_EVENTS</code> (issuer/sector are denormalized onto each event, so
+                  no dimension join is needed),
                   computes <code>AGE_SEC</code>, orders by <code>EVENT_TS DESC</code>, and
                   returns 30 rows. The IT-poll is a single point lookup on
                   <code>EVENT_ID</code>. Order-by-limit queries on Interactive Tables also have

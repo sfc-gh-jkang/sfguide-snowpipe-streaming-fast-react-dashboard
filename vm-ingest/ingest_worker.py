@@ -47,6 +47,70 @@ AGENCIES = ["SP", "MOODY", "FITCH"]
 RATINGS = ["AAA", "AA+", "AA", "AA-", "A+", "A", "A-", "BBB+", "BBB", "BBB-", "BB+", "BB"]
 MARK_SOURCES = ["BLOOMBERG", "REUTERS", "ICE", "INTERNAL", "MARKIT"]
 
+# Denormalized POSITIONS_DIM attributes, keyed by POSITION_ID. Loaded once at
+# startup (load_positions) so every streamed event can carry the position's
+# static attributes. This is what lets the dashboard serve tiles directly from
+# the RAW_EVENTS interactive table with no POSITIONS_DIM join — an Interactive
+# Warehouse can only join interactive tables, so we denormalize instead.
+# Attribute columns stamped onto each event:
+POSITION_ATTR_COLS = (
+    "ISSUER", "SECTOR", "TRANCHE", "PAR_AMOUNT",
+    "FUND", "WATCHLIST", "BASELINE_MARK", "CURRENT_RATING",
+)
+POSITIONS: dict[str, dict[str, Any]] = {}
+
+
+def load_positions() -> int:
+    """Load POSITIONS_DIM into the in-memory POSITIONS map via a keypair session.
+
+    The HPA SDK can only append rows, not SELECT, so we use a short-lived
+    snowflake.connector session (same RSA key as the streamer) to read the
+    dimension once at startup. On failure we log and continue with an empty map;
+    events then stream without denormalized attributes (tiles degrade to NULLs)
+    rather than crashing the producer.
+    """
+    global POSITIONS, POSITION_IDS
+    try:
+        import snowflake.connector
+
+        conn = snowflake.connector.connect(
+            account=SF_ACCOUNT,
+            user=SF_USER,
+            private_key_file=SF_KEY_PATH,
+            role=SF_ROLE,
+            database=SF_DB,
+            schema=SF_SCHEMA,
+        )
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT POSITION_ID, ISSUER, SECTOR, TRANCHE, PAR_AMOUNT, "
+                f"FUND, WATCHLIST, BASELINE_MARK, CURRENT_RATING "
+                f"FROM {SF_DB}.{SF_SCHEMA}.POSITIONS_DIM"
+            )
+            loaded: dict[str, dict[str, Any]] = {}
+            for r in cur.fetchall():
+                loaded[r[0]] = {
+                    "ISSUER": r[1],
+                    "SECTOR": r[2],
+                    "TRANCHE": r[3],
+                    "PAR_AMOUNT": float(r[4]) if r[4] is not None else None,
+                    "FUND": r[5],
+                    "WATCHLIST": bool(r[6]) if r[6] is not None else None,
+                    "BASELINE_MARK": float(r[7]) if r[7] is not None else None,
+                    "CURRENT_RATING": r[8],
+                }
+            POSITIONS = loaded
+        finally:
+            conn.close()
+        # Keep POSITION_IDS in sync with what actually exists in the dimension.
+        if POSITIONS:
+            POSITION_IDS = sorted(POSITIONS.keys())
+        log.info("Loaded %d positions from POSITIONS_DIM for denormalization", len(POSITIONS))
+    except Exception:
+        log.exception("Failed to load POSITIONS_DIM — events will stream without denormalized attrs")
+    return len(POSITIONS)
+
 log = logging.getLogger("credit-ingest")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -90,22 +154,40 @@ async def lifespan(app: FastAPI):
         service.initialize()
         log.info("StreamingService ready")
 
-        # Pre-warm channels: fire 3 dummy events so first real click doesn't pay cold-start.
-        # Uses source_app='warmup' so dashboard tiles can filter these out.
-        for i in range(3):
-            warmup_row = {
+        # Load the dimension so streamed events can carry denormalized attributes.
+        load_positions()
+
+        # Seed one baseline MARK per position so the RAW_EVENTS interactive table
+        # always reflects the full 62-position book — the dashboard tiles read
+        # RAW_EVENTS directly (no POSITIONS_DIM join), so a position with zero
+        # events would otherwise be invisible until it first trades. Baseline
+        # marks use NEW_MARK = BASELINE_MARK (flat P&L) and SOURCE_APP='seed' so
+        # the live tape filters them out. This also pre-warms the channels, so
+        # the separate warmup loop is no longer needed.
+        seeded = 0
+        seed_positions = POSITION_IDS or ["POS-0001"]
+        for pos in seed_positions:
+            attrs = POSITIONS.get(pos, {})
+            baseline = attrs.get("BASELINE_MARK")
+            now = datetime.now(timezone.utc)
+            seed_row = {
                 "EVENT_ID": str(uuid.uuid4()),
-                "EVENT_TS": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f"),
-                "EVENT_TYPE": "WARMUP",
-                "POSITION_ID": "POS-0001",
-                "SOURCE_APP": "warmup",
-                "INGESTED_TS": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f"),
+                "EVENT_TS": now.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                "EVENT_TYPE": "MARK",
+                "POSITION_ID": pos,
+                "PREV_MARK": baseline,
+                "NEW_MARK": baseline,
+                "MARK_SOURCE": "SEED",
+                "SOURCE_APP": "seed",
+                "INGESTED_TS": now.strftime("%Y-%m-%d %H:%M:%S.%f"),
             }
+            _stamp_position_attrs(seed_row)
             try:
-                service.stream_row(warmup_row, partition_key="POS-0001")
-                log.info("Warmup event %d/3 committed", i + 1)
+                service.stream_row(seed_row, partition_key=pos, offset_token=seed_row["EVENT_ID"])
+                seeded += 1
             except Exception:
-                log.warning("Warmup event %d/3 failed (non-fatal)", i + 1, exc_info=True)
+                log.warning("Baseline seed for %s failed (non-fatal)", pos, exc_info=True)
+        log.info("Seeded %d/%d baseline position marks", seeded, len(seed_positions))
     except Exception:
         log.exception("Failed to initialize StreamingService")
     yield
@@ -170,7 +252,24 @@ def _fill_defaults(req: IngestRequest) -> dict:
     if req.payload:
         row["PAYLOAD"] = json.dumps(req.payload)
 
+    _stamp_position_attrs(row)
     return row
+
+
+def _stamp_position_attrs(row: dict) -> None:
+    """Denormalize the position's static attributes onto the event row.
+
+    Looks up POSITION_ID in the in-memory POSITIONS map (loaded from
+    POSITIONS_DIM at startup) and copies ISSUER/SECTOR/TRANCHE/PAR_AMOUNT/
+    FUND/WATCHLIST/BASELINE_MARK/CURRENT_RATING onto the row. Without this the
+    dashboard tiles (which read RAW_EVENTS directly, no dimension join) would
+    show NULL issuer/sector/PnL. If the position is unknown, leaves them unset.
+    """
+    attrs = POSITIONS.get(row.get("POSITION_ID"))
+    if not attrs:
+        return
+    for col in POSITION_ATTR_COLS:
+        row[col] = attrs.get(col)
 
 
 # ---------------------------------------------------------------------------

@@ -68,7 +68,9 @@ Both forks can run simultaneously against the same Snowflake account:
 1. **Parent fork** uses: `CREDIT_POOL`, `CREDIT_INGEST_EAI`, Streamlit on Snowflake
 2. **This fork** uses: `DASHBOARD_POOL`, `DASHBOARD_VM_EAI`, Next.js on SPCS
 
-They share: `CREDIT_DEMO` schema, `RAW_EVENTS`, `POSITIONS_DIM`, `PORTFOLIO_LIVE`, `CREDIT_DEMO_INT_WH`, `CREDIT_AGENT`, `CREDIT_SV`, `POSITIONS_SEARCH`.
+They share: `CREDIT_DEMO` schema, `RAW_EVENTS`, `POSITIONS_DIM`, `CREDIT_DEMO_INT_WH`, `CREDIT_AGENT`, `CREDIT_SV`, `POSITIONS_SEARCH`.
+
+> **Divergence note:** this fork converts `RAW_EVENTS` into an **Interactive Table** (Snowpipe Streaming writes directly into it) and drops the `PORTFOLIO_LIVE` rollup table + `PORTFOLIO_LIVE_VIEW`. The parent Streamlit fork expects a *standard* `RAW_EVENTS` plus `PORTFOLIO_LIVE`, so the two are no longer a clean drop-in share on the same objects — run the parent against its own schema if you need a true side-by-side.
 
 ### Steps for A/B recording
 

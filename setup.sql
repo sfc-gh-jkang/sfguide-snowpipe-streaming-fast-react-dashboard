@@ -33,7 +33,28 @@ USE WAREHOUSE ${STANDARD_WH};
 -- -------------------------------------------------------------------------
 -- 2. Tables
 -- -------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS (
+-- RAW_EVENTS is an INTERACTIVE TABLE: Snowpipe Streaming HPA writes rows
+-- DIRECTLY into it via the channel API (auto-pipe RAW_EVENTS-STREAMING) — no
+-- intermediate landing table, no COPY INTO. It is BOTH the system of record
+-- AND the hot serving layer (same pattern as the Snowflake arcade-lab
+-- ARCADE_SCORES table). CLUSTER BY (EVENT_TS) so the dashboard's "last 24h"
+-- tile queries prune micro-partitions and stay sub-second on the Interactive
+-- WH. Position attributes are DENORMALIZED onto every event (ISSUER ..
+-- CURRENT_RATING) so serving queries never join POSITIONS_DIM — an Interactive
+-- Warehouse can only join interactive tables, so the denormalized copy keeps
+-- every tile query single-table.
+--
+-- CREATE OR REPLACE (not IF NOT EXISTS): a standard table cannot be altered
+-- into an interactive one, so bootstrap recreates it. The producer re-seeds one
+-- baseline event per position on startup (interactive tables reject INSERT DML,
+-- so seeding happens via the streaming path, not SQL). Drop the auto-created
+-- streaming pipe AND any pre-existing RAW_EVENTS first — you cannot CREATE OR
+-- REPLACE across table types (standard -> interactive), so an explicit DROP is
+-- required. The HPA SDK recreates RAW_EVENTS-STREAMING on the next channel open.
+DROP PIPE IF EXISTS ${APP_DB}.${APP_SCHEMA}."RAW_EVENTS-STREAMING";
+DROP TABLE IF EXISTS ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS;
+
+CREATE INTERACTIVE TABLE ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS (
     EVENT_ID        VARCHAR     NOT NULL,
     EVENT_TS        TIMESTAMP_NTZ NOT NULL,
     INGESTED_TS     TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
@@ -50,8 +71,19 @@ CREATE TABLE IF NOT EXISTS ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS (
     TO_RATING       VARCHAR,
     AGENCY          VARCHAR,
     PAYLOAD         VARIANT,
-    SOURCE_APP      VARCHAR DEFAULT 'streamlit_demo'
-);
+    SOURCE_APP      VARCHAR DEFAULT 'streamlit_demo',
+    -- Denormalized POSITIONS_DIM attributes (static per POSITION_ID; the
+    -- producer stamps these onto every event from an in-memory dimension map).
+    ISSUER          VARCHAR,
+    SECTOR          VARCHAR,
+    TRANCHE         VARCHAR,
+    PAR_AMOUNT      NUMBER(18,2),
+    FUND            VARCHAR,
+    WATCHLIST       BOOLEAN,
+    BASELINE_MARK   NUMBER(10,4),
+    CURRENT_RATING  VARCHAR
+)
+CLUSTER BY (EVENT_TS);
 
 CREATE TABLE IF NOT EXISTS ${APP_DB}.${APP_SCHEMA}.POSITIONS_DIM (
     POSITION_ID         VARCHAR     NOT NULL PRIMARY KEY,
@@ -153,132 +185,16 @@ WHEN NOT MATCHED THEN INSERT
   (src.POSITION_ID,src.ISSUER,src.SECTOR,src.TRANCHE,src.PAR_AMOUNT,src.ORIGINAL_SPREAD_BPS,src.VINTAGE_YEAR,src.FUND,src.WATCHLIST,src.CURRENT_RATING,src.BASELINE_MARK);
 
 -- -------------------------------------------------------------------------
--- 4. PORTFOLIO_LIVE_VIEW — lightweight view that queries.py references
---    for dashboard tiles. Aggregates latest mark, trade, rating per position.
+-- 4. Interactive Warehouse
+--    Serves ALL dashboard reads (tape + tiles + time-travel) directly from the
+--    RAW_EVENTS interactive table. There is no separate rollup table or view:
+--    the position-book tiles aggregate at query time. With 62 positions and a
+--    table clustered on EVENT_TS, the "last 24h" window queries prune to a small
+--    scan and stay sub-second, well under the 5s interactive-warehouse timeout.
+--    The /api/snapshot/standard route runs the SAME queries on ${STANDARD_WH}
+--    for the A/B latency comparison — a standard WH can also read an interactive
+--    table, just without the pre-computed index + warm SSD cache.
 -- -------------------------------------------------------------------------
-CREATE OR REPLACE VIEW ${APP_DB}.${APP_SCHEMA}.PORTFOLIO_LIVE_VIEW AS
-WITH e AS (
-  SELECT * FROM ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS
-  WHERE event_ts >= DATEADD('day', -1, CURRENT_TIMESTAMP())
-),
-m AS (
-  SELECT position_id, new_mark, prev_mark, event_ts
-  FROM e WHERE event_type = 'MARK'
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY position_id ORDER BY event_ts DESC) = 1
-),
-r AS (
-  SELECT position_id, to_rating, event_ts
-  FROM e WHERE event_type = 'CREDIT_EVENT'
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY position_id ORDER BY event_ts DESC) = 1
-),
-t AS (
-  SELECT position_id, side, qty, price, counterparty, event_ts
-  FROM e WHERE event_type = 'TRADE'
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY position_id ORDER BY event_ts DESC) = 1
-),
-c AS (
-  SELECT position_id, COUNT(*) AS events_today, MAX(event_ts) AS latest_event_ts
-  FROM e GROUP BY position_id
-)
-SELECT
-  p.position_id, p.issuer, p.sector, p.tranche, p.par_amount, p.fund, p.watchlist,
-  COALESCE(m.new_mark, p.baseline_mark)                                   AS current_mark,
-  p.baseline_mark                                                          AS opening_mark,
-  (COALESCE(m.new_mark, p.baseline_mark) - p.baseline_mark) * 100         AS mark_change_bps,
-  (COALESCE(m.new_mark, p.baseline_mark) - p.baseline_mark) / 100.0
-    * p.par_amount                                                         AS pnl_today,
-  COALESCE(r.to_rating, p.current_rating)                                  AS rating,
-  t.side AS last_trade_side, t.qty AS last_trade_qty,
-  t.price AS last_trade_price, t.counterparty AS last_trade_cpty,
-  c.latest_event_ts, COALESCE(c.events_today, 0) AS events_today
-FROM ${APP_DB}.${APP_SCHEMA}.POSITIONS_DIM p
-LEFT JOIN m USING (position_id)
-LEFT JOIN r USING (position_id)
-LEFT JOIN t USING (position_id)
-LEFT JOIN c USING (position_id);
-
--- -------------------------------------------------------------------------
--- 5. Interactive Table + Interactive Warehouse
--- -------------------------------------------------------------------------
-CREATE OR REPLACE INTERACTIVE TABLE ${APP_DB}.${APP_SCHEMA}.PORTFOLIO_LIVE
-  CLUSTER BY (SECTOR, ISSUER)
-  TARGET_LAG = '1 minute'
-  WAREHOUSE = ${STANDARD_WH}
-  AS
-  WITH ranked_events AS (
-    SELECT
-      e.POSITION_ID,
-      e.EVENT_TYPE,
-      e.EVENT_TS,
-      e.INGESTED_TS,
-      e.SIDE,
-      e.QTY,
-      e.PRICE,
-      e.NEW_MARK,
-      e.TO_RATING,
-      ROW_NUMBER() OVER (PARTITION BY e.POSITION_ID ORDER BY e.EVENT_TS DESC) AS rn
-    FROM ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS e
-    WHERE e.EVENT_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-  ),
-  latest_marks AS (
-    SELECT POSITION_ID, NEW_MARK AS LATEST_MARK
-    FROM (
-      SELECT POSITION_ID, NEW_MARK,
-        ROW_NUMBER() OVER (PARTITION BY POSITION_ID ORDER BY EVENT_TS DESC) AS rn
-      FROM ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS
-      WHERE EVENT_TYPE = 'MARK'
-        AND EVENT_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-    ) WHERE rn = 1
-  ),
-  latest_trades AS (
-    SELECT POSITION_ID, EVENT_TS AS LAST_TRADE_TS, SIDE AS LAST_TRADE_SIDE,
-           QTY AS LAST_TRADE_QTY, PRICE AS LAST_TRADE_PRICE
-    FROM (
-      SELECT POSITION_ID, EVENT_TS, SIDE, QTY, PRICE,
-        ROW_NUMBER() OVER (PARTITION BY POSITION_ID ORDER BY EVENT_TS DESC) AS rn
-      FROM ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS
-      WHERE EVENT_TYPE = 'TRADE'
-        AND EVENT_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-    ) WHERE rn = 1
-  ),
-  latest_ratings AS (
-    SELECT POSITION_ID, TO_RATING AS LATEST_RATING
-    FROM (
-      SELECT POSITION_ID, TO_RATING,
-        ROW_NUMBER() OVER (PARTITION BY POSITION_ID ORDER BY EVENT_TS DESC) AS rn
-      FROM ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS
-      WHERE EVENT_TYPE = 'CREDIT_EVENT'
-        AND EVENT_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-    ) WHERE rn = 1
-  )
-  SELECT
-    p.POSITION_ID,
-    p.ISSUER,
-    p.SECTOR,
-    p.TRANCHE,
-    p.PAR_AMOUNT,
-    p.FUND,
-    COALESCE(lm.LATEST_MARK, p.BASELINE_MARK)              AS LATEST_MARK,
-    (COALESCE(lm.LATEST_MARK, p.BASELINE_MARK) - p.BASELINE_MARK) * 100
-                                                              AS MARK_CHANGE_BPS,
-    lt.LAST_TRADE_TS,
-    lt.LAST_TRADE_SIDE,
-    lt.LAST_TRADE_QTY,
-    lt.LAST_TRADE_PRICE,
-    COALESCE(lr.LATEST_RATING, p.CURRENT_RATING)            AS CURRENT_RATING,
-    p.WATCHLIST,
-    ROUND(
-      (COALESCE(lm.LATEST_MARK, p.BASELINE_MARK) - p.BASELINE_MARK)
-      / 100.0 * p.PAR_AMOUNT,
-      2
-    )                                                         AS PNL_TODAY,
-    COALESCE(re.EVENT_TS, CURRENT_TIMESTAMP())               AS LATEST_EVENT_TS
-  FROM ${APP_DB}.${APP_SCHEMA}.POSITIONS_DIM p
-  LEFT JOIN latest_marks lm   ON lm.POSITION_ID = p.POSITION_ID
-  LEFT JOIN latest_trades lt   ON lt.POSITION_ID = p.POSITION_ID
-  LEFT JOIN latest_ratings lr  ON lr.POSITION_ID = p.POSITION_ID
-  LEFT JOIN ranked_events re   ON re.POSITION_ID = p.POSITION_ID AND re.rn = 1;
-
 CREATE WAREHOUSE IF NOT EXISTS ${INTERACTIVE_WH}
   WAREHOUSE_TYPE = 'INTERACTIVE'
   WAREHOUSE_SIZE = 'XSMALL'
@@ -287,7 +203,8 @@ CREATE WAREHOUSE IF NOT EXISTS ${INTERACTIVE_WH}
   INITIALLY_SUSPENDED = TRUE
   COMMENT = 'ACME demo Interactive WH';
 
-ALTER WAREHOUSE ${INTERACTIVE_WH} ADD TABLES (${APP_DB}.${APP_SCHEMA}.PORTFOLIO_LIVE);
+-- Associate the streaming target so the Interactive WH can serve it.
+ALTER WAREHOUSE ${INTERACTIVE_WH} ADD TABLES (${APP_DB}.${APP_SCHEMA}.RAW_EVENTS);
 
 -- -------------------------------------------------------------------------
 -- 6. Ingest role + user placeholder
@@ -476,9 +393,7 @@ GRANT USAGE ON WAREHOUSE ${INTERACTIVE_WH} TO ROLE ${DASHBOARD_ROLE};
 GRANT USAGE ON WAREHOUSE ${STANDARD_WH} TO ROLE ${DASHBOARD_ROLE};
 GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS TO ROLE ${DASHBOARD_ROLE};
 GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.POSITIONS_DIM TO ROLE ${DASHBOARD_ROLE};
-GRANT SELECT ON VIEW ${APP_DB}.${APP_SCHEMA}.PORTFOLIO_LIVE_VIEW TO ROLE ${DASHBOARD_ROLE};
 GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.${APP_CONFIG_TABLE} TO ROLE ${DASHBOARD_ROLE};
-GRANT SELECT ON INTERACTIVE TABLE ${APP_DB}.${APP_SCHEMA}.PORTFOLIO_LIVE TO ROLE ${DASHBOARD_ROLE};
 GRANT USAGE ON AGENT ${APP_DB}.${APP_SCHEMA}.${AGENT_NAME} TO ROLE ${DASHBOARD_ROLE};
 GRANT USAGE ON CORTEX SEARCH SERVICE ${APP_DB}.${APP_SCHEMA}.POSITIONS_SEARCH TO ROLE ${DASHBOARD_ROLE};
 GRANT USAGE ON COMPUTE POOL ${DASHBOARD_POOL} TO ROLE ${DASHBOARD_ROLE};

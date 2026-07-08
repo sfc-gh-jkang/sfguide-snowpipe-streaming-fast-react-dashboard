@@ -17,7 +17,7 @@
 |---|---|---|---|
 | Producer VM + HPA SDK | FastAPI + 4-ch pool | FastAPI + 4-ch pool | Unchanged |
 | Snowpipe Streaming commit | ~30ms | ~30ms | Unchanged |
-| Interactive Table | PORTFOLIO_LIVE | PORTFOLIO_LIVE | Unchanged |
+| Interactive Table | RAW_EVENTS (streaming target + serving) | RAW_EVENTS (streaming target + serving) | Unchanged |
 | Interactive Warehouse | CREDIT_DEMO_INT_WH | CREDIT_DEMO_INT_WH | Unchanged |
 | Cortex Agent | CREDIT_AGENT | CREDIT_AGENT | Unchanged |
 | **UI framework** | **Full-page rerun (3-5s)** | **Next.js + WebSocket (<100ms)** | **30-50x faster** |

@@ -1,5 +1,58 @@
 /**
- * Streamlit parent demo render-segment baseline — DIRECTLY MEASURED.
+ * ============================================================================
+ * TWO CATEGORIES OF NUMBERS — read this before trusting any figure here.
+ * ============================================================================
+ *
+ * 1. REACT_FORK_SERVING_MS  — THIS fork's serving-query latency on the
+ *    Interactive vs Standard warehouse. RE-BENCHMARKED 2026-07-07 against the
+ *    live aws_spcs account on the CURRENT architecture (RAW_EVENTS is itself the
+ *    Interactive Table; tiles aggregate at query time). These reflect what the
+ *    app does today. See constant below for methodology.
+ *
+ * 2. STREAMLIT_* (rerun + per-warehouse profile) — HISTORICAL baseline from the
+ *    PARENT Streamlit-on-Snowflake demo, measured 2026-05-19 on a DIFFERENT
+ *    account and the OLD architecture. These are a STORED reference, NOT
+ *    re-measured live (the parent Streamlit demo is not deployed on this
+ *    account — a 30-day QUERY_HISTORY scan for STPLATSTREAMLIT* returned zero
+ *    rows). Treat them as an illustrative comparison, not a fresh measurement.
+ *
+ * Anything the running app labels "MEASURED n=…" (click pipeline, IT-poll, WS
+ * wire, render) is genuinely measured live in the browser session and is not in
+ * this file — it comes from the store's latencyBars.
+ * ============================================================================
+ */
+
+/**
+ * THIS fork's serving-query latency, re-benchmarked 2026-07-07 on aws_spcs.
+ *
+ * Methodology: the book-rollup serving query (identical to queries.ts
+ * `pnl_today` — 3 window-function CTEs over the RAW_EVENTS interactive table,
+ * aggregated at query time) run 30× on each warehouse in a single session;
+ * p50/p95 of server-side TOTAL_ELAPSED_TIME read from
+ * INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION (session-scoped so the 200ms
+ * reader poll's queries are excluded). The Interactive WH ran under live reader
+ * load and still held a tight distribution; the Standard WH was on-demand.
+ *
+ *   INTERACTIVE_WH:  p50 130 ms, p95 151 ms  (n=30)
+ *   STANDARD_WH:     p50 295 ms, p95 872 ms  (n=30)
+ *
+ * => Interactive ~2.3× faster at p50, ~5.8× faster at p95 for the same query.
+ * NOTE: this rollup is heavier than the parent demo's old single-row lookup,
+ * so the interactive p50 (130 ms) is higher than the parent's historical 60 ms
+ * single-query figure below — different query, different architecture.
+ */
+export const REACT_FORK_SERVING_MS = {
+  int_wh: { p50: 130, p95: 151, n: 30 },
+  std_wh: { p50: 295, p95: 872, n: 30 },
+  measurement_window: "2026-07-07 (aws_spcs)",
+  source:
+    "book-rollup serving query, 30× per WH, server-side TOTAL_ELAPSED_TIME via QUERY_HISTORY_BY_SESSION",
+} as const;
+
+/**
+ * HISTORICAL — Streamlit parent demo render-segment baseline.
+ * Measured 2026-05-19 on the parent Streamlit demo (different account, old
+ * architecture). NOT re-measured live — see the TWO CATEGORIES note above.
  *
  * Methodology v7 (current): WebSocket push is the canonical comparison
  * channel; SSE was retired because SPCS Snowsight ingress reaps long-lived
@@ -108,20 +161,23 @@
  * apples-vs-oranges.
  */
 
-/** Real Streamlit rerun wall-clock, directly measured from QUERY_HISTORY. */
+/** HISTORICAL Streamlit rerun wall-clock, measured from QUERY_HISTORY on the
+ *  parent demo (2026-05-19). Stored reference, not re-measured live. */
 export const STREAMLIT_RERUN_MEASURED_MS = {
   p50: 1646,
   p95: 3391,
   n_bursts: 88,
-  measurement_window: "7 days ending 2026-05-19",
+  measurement_window: "7 days ending 2026-05-19 (parent Streamlit demo)",
   source: "QUERY_HISTORY burst clustering (USER_NAME LIKE STPLATSTREAMLIT*)",
 } as const;
 
-/** Per-warehouse single-query timings (still useful for comparing vs React REST API). */
+/** HISTORICAL parent-Streamlit per-warehouse single-query timings (2026-05-19,
+ *  different account, OLD architecture). Kept only as context — NOT this fork's
+ *  numbers. For this fork's current WH comparison use REACT_FORK_SERVING_MS. */
 export const STREAMLIT_QUERY_PROFILE_MS = {
   int_wh: { p50: 60, p95: 95, n: 8795 },
   std_wh: { p50: 98, p95: 241, n: 22056 },
-  measurement_window: "7 days ending 2026-05-19",
+  measurement_window: "7 days ending 2026-05-19 (parent Streamlit demo)",
   source_user: "STPLATSTREAMLIT* (SiS Container Runtime)",
 } as const;
 

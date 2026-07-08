@@ -135,7 +135,7 @@ export function EventGenerator() {
         <button
           onClick={() => fireEvent("MARK")}
           disabled={loading !== null}
-          title="Generate a synthetic MARK event (price update). Picks a random POSITION_ID, generates a new mark price within ±50 bps of the prior, POSTs to /api/ingest. Drives PORTFOLIO_LIVE.CURRENT_MARK and the Top Marks panel. Same ingest path as TRADE — Snowpipe Streaming HPA SDK + WebSocket optimistic + IT visibility."
+          title="Generate a synthetic MARK event (price update). Picks a random POSITION_ID, generates a new mark price within ±50 bps of the prior, POSTs to /api/ingest. Drives the position's CURRENT_MARK (computed at query time from RAW_EVENTS) and the Top Marks panel. Same ingest path as TRADE — Snowpipe Streaming HPA SDK + WebSocket optimistic + IT visibility."
           className="px-3 py-2 text-xs font-semibold rounded bg-slate-600 text-white hover:bg-slate-500 disabled:opacity-50 transition-colors"
         >
           {loading === "MARK" ? "..." : "Mark"}

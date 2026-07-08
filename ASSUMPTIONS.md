@@ -114,7 +114,7 @@ That's the **published SLA** for HPA. The 5 seconds is the floor, not a guarante
 
 - **CREDIT_INGEST_USR** is allowed by `CREDIT_INGEST_POLICY` network rule (CIDR `<your-vm-static-ip>/32` — the static NAT IP of the GCP VM). If the VM's NAT IP changes (GCP regional outage, manual IP rotation), the policy must be updated.
 - **The VM's docker-compose stack** mounts the keypair from `/opt/credit-ingest/keys/credit_ingest.p8` (chmod 600, owned by root). The container's appuser reads it via volume mount.
-- **The Next.js dashboard** runs as the SPCS Snowflake App's owner role. It does NOT switch into a separate read-only role at runtime because the OAuth token mounted at `/snowflake/session/token` is a scoped token bound to one role (see README gotcha #6). Read-only scoping is preserved at the SQL/object-grant layer — the owner role has SELECT on RAW_EVENTS, POSITIONS_DIM, PORTFOLIO_LIVE_VIEW but no INSERT/UPDATE/DELETE.
+- **The Next.js dashboard** runs as the SPCS Snowflake App's owner role. It does NOT switch into a separate read-only role at runtime because the OAuth token mounted at `/snowflake/session/token` is a scoped token bound to one role (see README gotcha #6). Read-only scoping is preserved at the SQL/object-grant layer — the owner role has SELECT on RAW_EVENTS (the Interactive Table it serves from), POSITIONS_DIM, and APP_CONFIG but no INSERT/UPDATE/DELETE.
 - **Cloudflared tunnel auth** is one-way (Cloudflare → VM); the VM's API key (`X-API-Key: <set-via-env-INGEST_API_KEY>`) is the application-layer auth. Anyone with that key + the public URL can POST. Acceptable for demo; rotate via env-var for production.
 
 ## 5. Failure modes and recovery
@@ -123,7 +123,7 @@ That's the **published SLA** for HPA. The 5 seconds is the floor, not a guarante
 |---------|--------|----------|
 | HPA channel token expires (~1h) | append_row raises | StreamingService `_is_recoverable` catches, `_recover_channel` reopens; bounded retry |
 | Snowflake regional issue | All channels fail | StreamingService raises after MAX_RECOVERY_ATTEMPTS=3; FastAPI returns 503 |
-| VM reboot or container restart | Channel state lost | `lifespan` reinitializes 4 channels + 3 warmup events on startup |
+| VM reboot or container restart | Channel state lost | `lifespan` reinitializes 4 channels, reloads POSITIONS_DIM, and re-seeds one baseline MARK per position on startup |
 | Cloudflared tunnel disconnect | The dashboard's `/api/ingest` returns 502; the React UI shows the latency banner with the failure | cloudflared has `restart: always` in systemd; reconnects in 5-30s |
 | Network policy IP drift | All ingest fails with 390195 | Update `CREDIT_INGEST_POLICY` network rule with new VM NAT IP |
 | Interactive Warehouse cold | First query takes 3-5s | Pre-warm with `SELECT 1 FROM RAW_EVENTS LIMIT 1` 30s before the demo |
