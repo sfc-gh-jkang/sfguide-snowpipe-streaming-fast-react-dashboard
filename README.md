@@ -261,28 +261,42 @@ flowchart TB
 
 ## Quickstart
 
-### TL;DR (5 commands)
+### TL;DR — one command
 
 ```bash
-cp .env.example .env                # then fill in 4 values
-./deploy-app.sh --bootstrap         # provisions Snowflake + deploys dashboard
-cd vm-ingest && cp .env.example .env && docker compose --profile quick up -d
-docker logs credit-cloudflared-quick | grep trycloudflare    # paste URL into top-level .env INGEST_TUNNEL_HOST
-cd .. && ./deploy-app.sh            # re-deploy with the tunnel host set
+./quickstart.sh <your-snow-connection>
 ```
 
-Then `snow app open --connection "$SNOWFLAKE_CONNECTION"` to launch the dashboard.
+On a fresh account this does everything: writes `.env`, auto-detects your account, generates the ingest keypair, provisions all Snowflake objects, creates the `CREDIT_INGEST_USR` service user, starts the producer + a **local Cloudflare quick tunnel in Docker** (no cloud, no GCP, no public IP), captures the ephemeral tunnel URL, and deploys the dashboard. Idempotent and re-runnable. Stop the local producer/tunnel with `./quickstart.sh --down`.
+
+Then `snow app open --connection <your-snow-connection>` to launch it. Prereqs: `snow` CLI 3.0+ with an ACCOUNTADMIN connection, Docker running, `openssl`, `python3`.
+
+<details>
+<summary>Prefer to run the steps yourself? (manual)</summary>
+
+```bash
+cp .env.example .env                # fill SNOWFLAKE_CONNECTION + SNOWFLAKE_ACCOUNT
+./deploy-app.sh --infra-only        # provision Snowflake objects (DB/schema/WHs/IT/role/EAI/agent)
+# create the ingest service user (paste your public key):
+#   openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out vm-ingest/keys/credit_ingest.p8 -nocrypt
+#   openssl rsa -in vm-ingest/keys/credit_ingest.p8 -pubout -out vm-ingest/keys/credit_ingest.pub
+#   snow sql -c <conn> -q "CREATE USER IF NOT EXISTS CREDIT_INGEST_USR TYPE=SERVICE RSA_PUBLIC_KEY='<pubkey>'; GRANT ROLE CREDIT_INGEST_RL TO USER CREDIT_INGEST_USR;"
+cd vm-ingest && cp .env.example .env && docker compose --profile quick up -d --build
+docker logs credit-cloudflared-quick | grep trycloudflare    # paste host into top-level .env INGEST_TUNNEL_HOST
+cd .. && ./deploy-app.sh            # push tunnel config + deploy the app
+```
+</details>
 
 ### 0. Prerequisites
 
 - A Snowflake account where you have `ACCOUNTADMIN` (the bootstrap creates databases, roles, compute pools, EAIs)
 - `snow` CLI 3.0+ with a connection profile pointed at that account (`snow connection list`)
-- A VM somewhere reachable on the public internet that runs the cloudflared ingest tunnel (see [VM ingest setup](#vm-ingest-setup) below)
-- A populated `.env` (copy from `.env.example`):
-  - `SNOWFLAKE_CONNECTION` — name of your `snow` profile
-  - `SNOWFLAKE_ACCOUNT` — account locator (e.g. `MYORG-MY_ACCOUNT`)
-  - `INGEST_TUNNEL_HOST` — VM tunnel hostname (e.g. `*.trycloudflare.com` or your named tunnel host)
-  - `INGEST_API_KEY` — shared secret the dashboard sends with every `/ingest` POST
+- A host to run the small producer service + cloudflared tunnel — **your laptop works** (the quick tunnel gives it a public URL over an outbound connection, so no public IP, no cloud VM, and no GCP required). Any cloud VM works too. See [VM ingest setup](#vm-ingest-setup) below
+- A populated `.env` (copy from `.env.example`) — **`quickstart.sh` fills these for you**; only needed if you run the steps manually:
+  - `SNOWFLAKE_CONNECTION` — name of your `snow` profile (the only value you must supply)
+  - `SNOWFLAKE_ACCOUNT` — account locator (e.g. `MYORG-MY_ACCOUNT`); quickstart auto-detects it from the connection
+  - `INGEST_TUNNEL_HOST` — tunnel hostname (`*.trycloudflare.com` or your named host); quickstart captures it from the quick tunnel
+  - `INGEST_API_KEY` — shared secret the dashboard sends with every `/ingest` POST; quickstart generates a random one
 
 The other 15 identifiers in `.env.example` (database, schema, warehouse, role, pool, EAI, table names) all have working defaults — only override if you need to coexist with another deployment in the same account.
 
@@ -472,7 +486,8 @@ At a typical effective enterprise rate (~$2/credit) this demo idle costs roughly
 | `setup.sql` | Single source of truth for all Snowflake DDL (database/schema/warehouses/pool/EAI/roles/tables/agent/search service/grants), envsubst-templated from `.env` |
 | `semantic_view.sql` | Defines `CREDIT_SV` for the agent's text-to-SQL tool, also envsubst-templated |
 | `web/snowflake.yml` | Snowflake App manifest for SPCS deployment, envsubst-templated |
-| `deploy-app.sh` | Render templates → run setup SQL (with `--bootstrap`) → push runtime config → `snow app deploy` |
+| `quickstart.sh` | One command for a fresh account: scaffolds `.env`, generates the ingest keypair, provisions objects (`--infra-only`), creates the ingest user, starts the local producer + quick tunnel, captures the URL, and deploys. `--down` stops the local containers |
+| `deploy-app.sh` | Render templates → run setup SQL (`--bootstrap` / `--infra-only`) → push runtime config → `snow app deploy` |
 | `.env.example` | All 23 envsubst variables with documented defaults |
 | `web/server.js` | Custom standalone server that monkey-patches Next.js's `server.js` to handle WebSocket upgrades on `/api/ws` |
 | `web/src/app/layout.tsx` | Root layout with the four-tab nav (Demo / Live Credit Desk / Ask the Book / How fresh & fast?) and global WS provider |

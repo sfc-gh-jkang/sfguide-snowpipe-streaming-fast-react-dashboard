@@ -10,6 +10,7 @@
 # Usage:
 #   ./deploy-app.sh                 # deploy app only (assumes infra exists)
 #   ./deploy-app.sh --bootstrap     # full provision + deploy (fresh account)
+#   ./deploy-app.sh --infra-only    # provision Snowflake objects only (no tunnel host / app deploy) — used by quickstart.sh
 #   ./deploy-app.sh --render-only   # render templates to /tmp; do not deploy
 # =============================================================================
 set -euo pipefail
@@ -18,9 +19,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BOOTSTRAP=false
 RENDER_ONLY=false
+INFRA_ONLY=false
 for arg in "$@"; do
   case "$arg" in
     --bootstrap) BOOTSTRAP=true ;;
+    --infra-only) INFRA_ONLY=true; BOOTSTRAP=true ;;
     --render-only) RENDER_ONLY=true ;;
     -h|--help)
       grep '^# ' "$0" | sed 's/^# \{0,1\}//'
@@ -44,8 +47,13 @@ required=(
   INGEST_ROLE DASHBOARD_ROLE DASHBOARD_POOL DASHBOARD_APP_NAME DASHBOARD_EAI
   INGEST_NETWORK_RULE APP_CONFIG_TABLE
   AGENT_NAME SEMANTIC_VIEW_NAME SEARCH_SERVICE_NAME INGEST_STAGE
-  INGEST_TUNNEL_HOST INGEST_API_KEY
 )
+# The tunnel host + API key are only needed for the config-push + app-deploy
+# steps, not for provisioning Snowflake objects. quickstart.sh runs --infra-only
+# BEFORE the tunnel exists, so don't require them then.
+if [[ "$RENDER_ONLY" != "true" && "$INFRA_ONLY" != "true" ]]; then
+  required+=( INGEST_TUNNEL_HOST INGEST_API_KEY )
+fi
 missing=()
 for v in "${required[@]}"; do
   if [[ -z "${!v:-}" || "${!v}" == "<"*">" ]]; then
@@ -103,6 +111,13 @@ if [[ "$BOOTSTRAP" == "true" ]]; then
 
   echo ""
   echo "==> Bootstrap complete."
+fi
+
+# --- Infra-only stops here (quickstart.sh creates the ingest user + tunnel next) ---
+if [[ "$INFRA_ONLY" == "true" ]]; then
+  echo ""
+  echo "==> --infra-only: Snowflake objects provisioned. Skipping tunnel-config push + app deploy."
+  exit 0
 fi
 
 # --- Push runtime config (always — survives schema rebuilds) ---
