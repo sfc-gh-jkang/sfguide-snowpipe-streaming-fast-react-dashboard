@@ -50,6 +50,23 @@ export const REACT_FORK_SERVING_MS = {
 } as const;
 
 /**
+ * Three serving strategies for the book rollup — WAREHOUSE-EXECUTION p50/p95
+ * (server-side TOTAL_ELAPSED_TIME, NOT client round-trip). Benchmarked
+ * 2026-07-08, 30× each in one session on CREDIT_DEMO_INT_WH (XSMALL) via
+ * QUERY_HISTORY_BY_SESSION (session-scoped, excludes the 200 ms reader poll).
+ * The ServingStrategyComparison panel shows these next to the LIVE round-trip
+ * number (which is larger because it includes the SPCS→Snowflake REST call +
+ * network + queue) so the two spans are never conflated.
+ */
+export const SERVING_STRATEGY_BENCH = {
+  windowed: { p50: 88, p95: 108 },
+  preagg: { p50: 19, p95: 69 },
+  optimized: { p50: 43, p95: 53 },
+  n: 30,
+  measured: "2026-07-08, CREDIT_DEMO_INT_WH XSMALL, QUERY_HISTORY_BY_SESSION",
+} as const;
+
+/**
  * HISTORICAL — Streamlit parent demo render-segment baseline.
  * Measured 2026-05-19 on the parent Streamlit demo (different account, old
  * architecture). NOT re-measured live — see the TWO CATEGORIES note above.

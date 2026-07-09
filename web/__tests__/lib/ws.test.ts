@@ -157,16 +157,18 @@ describe("WebSocket hook behavior (store-level)", () => {
       network_ms: 150,
       sdk_appended_ms: 25,
       flush_committed_ms: 250,
+      vm_overhead_ms: 5,
       it_poll_ms: 0, // Starts at 0; updated when WS arrives.
       render_ms: 0,
     });
 
-    store.updateLatencyBarItPoll("evt-it-1", 1820);
+    store.updateLatencyBarItPoll("evt-it-1", 1820, true, "raw");
 
     const bars = useDashboardStore.getState().latencyBars;
     const bar = bars.find((b) => b.event_id === "evt-it-1");
     expect(bar).toBeDefined();
     expect(bar!.it_poll_ms).toBe(1820);
+    expect(bar!.it_poll_confirmed).toBe(true);
     // Other fields untouched.
     expect(bar!.network_ms).toBe(150);
     expect(bar!.sdk_appended_ms).toBe(25);
@@ -182,15 +184,95 @@ describe("WebSocket hook behavior (store-level)", () => {
       network_ms: 100,
       sdk_appended_ms: 10,
       flush_committed_ms: 200,
+      vm_overhead_ms: 3,
       it_poll_ms: 0,
       render_ms: 0,
     });
 
     // Stale or out-of-order WS message: bar was already evicted from the cap.
-    store.updateLatencyBarItPoll("evt-vanished", 9999);
+    store.updateLatencyBarItPoll("evt-vanished", 9999, true, "raw");
 
     const bars = useDashboardStore.getState().latencyBars;
     expect(bars).toHaveLength(1);
     expect(bars[0].it_poll_ms).toBe(0); // untouched
+  });
+
+  it("addLatencyBar dedups by event_id: client bar replaces a ws placeholder", () => {
+    useDashboardStore.setState({ latencyBars: [] });
+    const store = useDashboardStore.getState();
+
+    // WS optimistic echo lands first (server-side network, 0 VM segments).
+    store.addLatencyBar({
+      label: "#1 TRADE",
+      event_id: "evt-dup",
+      network_ms: 1,
+      sdk_appended_ms: 0,
+      flush_committed_ms: 0,
+      vm_overhead_ms: 0,
+      it_poll_ms: 0,
+      render_ms: 0,
+      source: "ws",
+    });
+    // Client bar for the SAME event arrives (accurate network + segments).
+    store.addLatencyBar({
+      label: "#1 TRADE",
+      event_id: "evt-dup",
+      network_ms: 140,
+      sdk_appended_ms: 2,
+      flush_committed_ms: 90,
+      vm_overhead_ms: 6,
+      it_poll_ms: 0,
+      render_ms: 11,
+      source: "client",
+    });
+
+    const bars = useDashboardStore.getState().latencyBars;
+    expect(bars).toHaveLength(1); // deduped
+    expect(bars[0].source).toBe("client"); // client won
+    expect(bars[0].network_ms).toBe(140);
+    expect(bars[0].render_ms).toBe(11);
+
+    // A late ws dup for the same event is ignored (client stays).
+    store.addLatencyBar({
+      label: "#1b TRADE",
+      event_id: "evt-dup",
+      network_ms: 1,
+      sdk_appended_ms: 0,
+      flush_committed_ms: 0,
+      vm_overhead_ms: 0,
+      it_poll_ms: 0,
+      render_ms: 0,
+      source: "ws",
+    });
+    const after = useDashboardStore.getState().latencyBars;
+    expect(after).toHaveLength(1);
+    expect(after[0].network_ms).toBe(140);
+  });
+
+  it("updateLatencyBarItPoll routes table='book' to the book fields", () => {
+    useDashboardStore.setState({ latencyBars: [] });
+    const store = useDashboardStore.getState();
+    store.addLatencyBar({
+      label: "#b MARK",
+      event_id: "evt-book",
+      network_ms: 100,
+      sdk_appended_ms: 1,
+      flush_committed_ms: 80,
+      vm_overhead_ms: 4,
+      it_poll_ms: 0,
+      render_ms: 0,
+      source: "client",
+    });
+
+    store.updateLatencyBarItPoll("evt-book", 320, true, "raw");
+    store.updateLatencyBarItPoll("evt-book", 410, true, "book");
+
+    const bar = useDashboardStore
+      .getState()
+      .latencyBars.find((b) => b.event_id === "evt-book")!;
+    expect(bar.it_poll_ms).toBe(320);
+    expect(bar.it_poll_confirmed).toBe(true);
+    expect(bar.book_poll_ms).toBe(410);
+    expect(bar.book_poll_confirmed).toBe(true);
   });
 });

@@ -28,6 +28,7 @@ export function useWebSocket() {
     setTopMarks,
     setHpaStatus,
     addLatencyBar,
+    updateLatencyBarByEventId,
     updateLatencyBarItPoll,
   } = useDashboardStore();
 
@@ -95,22 +96,60 @@ export function useWebSocket() {
             network_ms: msg.latency.network_ms,
             sdk_appended_ms: msg.latency.sdk_appended_ms,
             flush_committed_ms: msg.latency.flush_committed_ms,
+            vm_overhead_ms: 0,
             it_poll_ms: 0,
             render_ms: 0,
+            partition: msg.event.partition,
+            source: "ws",
           });
           break;
         }
         case "verified": {
-          // Verified now fires at HPA flush ack with it_poll_ms=0; IT visibility
-          // arrives separately via `it_visible` (architectural fix, item #12).
-          // Just flip the optimistic event to verified status.
+          // Verified fires at HPA flush ack; IT visibility arrives separately via
+          // `it_visible`. Flip status AND backfill the real VM segments onto the
+          // bar — critical for WS-path (MarketSimulator) bars that were created
+          // with 0s at optimistic time. flush = max(raw, book) concurrency.
           seenIdsRef.current.add(msg.event_id);
           verifyEvent(msg.event_id);
+          const L = msg.latency;
+          const flush = Math.max(
+            L.flush_committed_ms,
+            L.book_flush_committed_ms ?? 0
+          );
+          const vmOverhead =
+            L.total_handler_ms != null
+              ? Math.max(0, L.total_handler_ms - L.sdk_appended_ms - flush)
+              : 0;
+          // SPCS handler + SPCS↔VM network/tunnel (cross-cloud) not attributed to
+          // the VM. Computed from SERVER-side values, so it's correct regardless
+          // of which bar it lands on; liveStats only ADDS it for ws bars (client
+          // bars already fold this transport into their measured network_ms).
+          const serverTransport =
+            L.total_handler_ms != null
+              ? Math.max(0, L.total_ms - L.network_ms - L.total_handler_ms)
+              : 0;
+          // Do NOT overwrite network_ms/render_ms: a client bar already has the
+          // accurate values, and a ws bar's server-side network is all we have.
+          updateLatencyBarByEventId(msg.event_id, {
+            sdk_appended_ms: L.sdk_appended_ms,
+            flush_committed_ms: flush,
+            vm_overhead_ms: vmOverhead,
+            server_transport_ms: serverTransport,
+            // Backfill the REAL partition (optimistic bar had 0 before the VM responded).
+            ...(msg.partition != null ? { partition: msg.partition } : {}),
+          });
           break;
         }
         case "it_visible": {
           // Async update: real IT-poll lag arrived after /api/ingest returned.
-          updateLatencyBarItPoll(msg.event_id, msg.it_poll_ms);
+          // `confirmed` false = probe gave up (it_poll_ms is a floor, not real).
+          // `table` routes to the raw (RAW_EVENTS) or book (POSITION_BOOK) fields.
+          updateLatencyBarItPoll(
+            msg.event_id,
+            msg.it_poll_ms,
+            msg.confirmed,
+            msg.table
+          );
           break;
         }
         case "tape":

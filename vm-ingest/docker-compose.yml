@@ -17,6 +17,8 @@ services:
       SNOWFLAKE_DATABASE: "SNOWFLAKE_EXAMPLE"
       SNOWFLAKE_SCHEMA: "CREDIT_DEMO"
       SNOWFLAKE_TABLE: "RAW_EVENTS"
+      # Strategy-2 pre-agg write-through target (second interactive table).
+      SNOWFLAKE_BOOK_TABLE: "POSITION_BOOK"
       SNOWFLAKE_PRIVATE_KEY_PATH: "/etc/credit/keys/credit_ingest.p8"
       PARTITION_COUNT: "4"
       INGEST_API_KEY: "${INGEST_API_KEY:-<set-via-env-INGEST_API_KEY>}"

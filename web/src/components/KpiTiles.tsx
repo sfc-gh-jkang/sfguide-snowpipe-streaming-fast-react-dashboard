@@ -47,9 +47,9 @@ export function KpiTiles() {
       <Tile label="Positions" value={kpi.position_count.toString()} />
       <Tile label="Watchlist" value={kpi.watchlist_count.toString()} />
       <Tile
-        label="IT Lag"
+        label="Data age"
         value={`${kpi.it_lag_seconds}s`}
-        delta="Interactive Table refresh"
+        delta="sec since last event"
       />
     </div>
   );

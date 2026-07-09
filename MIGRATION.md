@@ -84,7 +84,7 @@ They share: `CREDIT_DEMO` schema, `RAW_EVENTS`, `POSITIONS_DIM`, `CREDIT_DEMO_IN
 
 3. Start a screen recording.
 
-4. Click "New Trade" in the **React tab** — the optimistic row appears in ~0.4s (render step ~10ms).
+4. Click "New Trade" in the **React tab** — the optimistic row paints in ~10ms; it's confirmed queryable in the interactive table ~1.5–2s later (dominated by the ~1.3s p50 streaming-visibility lag, which varies ~0.7–2.4s).
 
 5. Click "New Trade" in the **Streamlit tab** — observe the ~1.6s full-page rerun (up to 3.4s p95).
 

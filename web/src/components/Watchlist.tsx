@@ -16,7 +16,7 @@ export function Watchlist() {
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-800/50 overflow-hidden">
       <div className="px-3 py-2 border-b border-slate-700 flex justify-between items-baseline">
-        <h3 className="text-sm font-medium text-slate-200">Credit Watchlist</h3>
+        <h3 className="text-sm font-medium text-slate-200" title="Flagged positions (WATCHLIST = TRUE), sorted worst P&L first — the names a credit desk is actively worried about.">Credit Watchlist</h3>
         <span className="text-xs text-slate-400">
           {rows.length} {rows.length === 1 ? "position" : "positions"}
         </span>

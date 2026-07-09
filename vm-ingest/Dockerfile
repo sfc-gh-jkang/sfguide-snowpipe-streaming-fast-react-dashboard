@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml uv.lock* ./
 RUN uv sync --frozen --no-dev
 
-COPY streaming_service.py ingest_worker.py ./
+COPY streaming_service.py ingest_worker.py book.py ./
 
 ENV PATH="/app/.venv/bin:$PATH"
 

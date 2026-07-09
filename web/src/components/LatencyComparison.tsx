@@ -117,7 +117,7 @@ export function LatencyComparison() {
     //   React (WebSocket, 4 segments):
     //     [click pipeline] → [IT visibility lag] → [WS detect+push] → [render]
     //     - click pipeline:    network + SDK + flush ack         ≈ 0.43 s
-    //     - IT visibility lag: row commits to IT after flush     ≈ 1.5-1.8 s
+    //     - IT visibility lag: row commits to IT after flush     ≈ 0.3-1.5 s
     //     - WS detect + push:  server scan (≤200 ms) + push      ≈ 0.13 s
     //     - render:            snapshot lifecycle + paint        ≈ 0.84 s
     //     ────────────────────────────────────────────────────────────
@@ -460,7 +460,7 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
               </li>
               <li>
                 <strong className="text-slate-200">Total user-perceived time to fresh data:</strong>{" "}
-                ~840 ms render lifecycle + ~{POLL_WAIT_AVG_MS} ms poll wait + ~1500 ms IT visibility = <strong>~3 s end-to-end</strong>
+                ~840 ms render lifecycle + ~{POLL_WAIT_AVG_MS} ms poll wait + ~1300 ms IT visibility (p50) = <strong>~2.9 s end-to-end (polling path)</strong>
                 {fullPageMedianMs != null && med?.it_poll != null && (() => {
                   const totalMs = fullPageMedianMs + POLL_WAIT_AVG_MS + med.it_poll;
                   return (
@@ -718,8 +718,9 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
                   <div className="mt-2 space-y-2 text-slate-400">
                     <p>
                       The bottleneck for both forks is the <strong className="text-slate-200">
-                      Interactive Table visibility lag</strong> (~1.5-1.8 s on an XSMALL
-                      Interactive Warehouse with our config). Neither architecture can
+                      Interactive Table visibility lag</strong> (typically a few hundred ms to
+                      ~1.5 s on an XSMALL Interactive Warehouse — live-measured, see the IT-poll
+                      segment). Neither architecture can
                       dodge it — the row must commit to RAW_EVENTS and become queryable
                       before any UI can show it. React waits for it via polling cadence;
                       Streamlit waits for it via &quot;the user clicks again because the
@@ -778,7 +779,7 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
                         On click, immediately insert a <em>pending</em> grey row in the
                         tape. When the next snapshot poll arrives, the row swaps to
                         verified. <strong>Apparent</strong> click→fresh latency drops to
-                        ~50 ms. The actual fresh-from-IT data still takes ~3 s — but
+                        ~50 ms. The actual fresh-from-IT data still takes ~1.5–2 s — but
                         the user sees something happen instantly.
                       </p>
                     </div>
@@ -970,6 +971,15 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
           </span>
         )}
       </div>
+      {latencyBars.length === 0 && (
+        <div className="mb-2 rounded border border-amber-700/50 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200/90 leading-snug">
+          Only the <span className="text-violet-300 font-medium">render layer</span> is populated
+          right now — it&apos;s measured passively from the dashboard&apos;s own snapshot repaint. The{" "}
+          <strong>click pipeline</strong>, <strong>IT visibility</strong>, and <strong>WS push</strong>{" "}
+          layers are measured from <em>fired events</em>. Click TRADE/MARK below (or flip on{" "}
+          <strong>Live market</strong>) and they fill in.
+        </div>
+      )}
       <div className="h-[160px]">
         <Bar data={chartData} options={options} />
       </div>
@@ -984,7 +994,7 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
           <div className="bg-amber-950/30 border border-amber-700/40 rounded p-2 text-amber-200/90">
             <strong>Heads up:</strong> the prose below uses archetypal
             numbers (~0.4 s click pipeline, ~840 ms render, ~10 ms click ack,
-            ~1.5-1.8 s IT visibility, etc.) to explain concepts and trade-offs.
+            a few hundred ms – ~1.5 s IT visibility, etc.) to explain concepts and trade-offs.
             The <strong>chart bars above</strong> and the <strong>live-values
             strips</strong> in the &quot;Why are there two render numbers&quot;
             and &quot;Why does the WS bar show ~0.10 s&quot; expanders are the
@@ -1005,7 +1015,7 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
               live browser session — median of the most recent{" "}
               {latencyBars.length} click(s). Prior to this session,{" "}
               <code>/api/ingest</code> awaited a server-side IT visibility check
-              (~1.5-1.8 s) BEFORE returning, which inflated React&apos;s click
+              (a few hundred ms – ~1.5 s) BEFORE returning, which inflated React&apos;s click
               pipeline ~4× vs Streamlit&apos;s parent fork (which doesn&apos;t verify
               visibility on click). That made the comparison apples-to-oranges.
               Fixed by moving the visibility probe to a fire-and-forget background
@@ -1229,7 +1239,7 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
               broadcasts a diff to every connected client. Each broadcast
               carries a server <code>_emit_ts</code>; the browser measures wire
               delivery as <code>recv − emit</code> on every message. Same
-              ~2.5-2.9 s end-to-end as the (also working) Cortex Agent SSE
+              ~1.5-2 s end-to-end (p50) as the (also working) Cortex Agent SSE
               POST pattern, with the freshness + click-ack-paint wins
               preserved.
               <br/>
@@ -1242,7 +1252,7 @@ t = 840 ms:     ✓ Browser paints all changes simultaneously
               <code>/api/ingest</code> now returns at HPA flush ack (~0.4 s)
               instead of awaiting visibility (~1.9 s). Click pipelines are
               apples-to-apples. End-to-end story honest: in polling mode React
-              and Streamlit were roughly tied on raw speed (~3 s).
+              and Streamlit were roughly tied on raw speed (~1.5–2 s p50).
               <br/>
               <strong>v4:</strong> swim-lane visualization replacing the
               misleading stacked-bar that summed parallel pipelines as if

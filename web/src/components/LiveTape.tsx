@@ -76,7 +76,7 @@ export function LiveTape() {
           {/* Optimistic preview toggle */}
           <label
             className="flex items-center gap-1.5 cursor-pointer text-xs text-slate-400"
-            title="When ON, clicking a fire button instantly prepends a grey 'pending' row to the tape (~10 ms paint) before the data lands in the Interactive Table. The row turns green ('verified') once the snapshot poll confirms it. Lets the tape feel instant despite the ~1.5-1.8 s IT visibility lag. When OFF, the tape only updates when the next snapshot poll fetches the row from the IT — feels laggier but is strictly read-from-database honest."
+            title="When ON, clicking a fire button instantly prepends a grey 'pending' row to the tape (~10 ms paint) before the data lands in the Interactive Table. The row turns green ('verified') once the snapshot poll confirms it. Lets the tape feel instant despite the IT visibility lag (typically a few hundred ms to ~1.5 s, live-measured). When OFF, the tape only updates when the next snapshot poll fetches the row from the IT — feels laggier but is strictly read-from-database honest."
           >
             <input
               type="checkbox"

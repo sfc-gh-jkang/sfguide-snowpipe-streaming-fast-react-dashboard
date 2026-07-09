@@ -36,7 +36,7 @@ jobs:
       - run: npm test -- --ci
 
   vm-ingest:
-    name: vm-ingest/ — ruff
+    name: vm-ingest/ — ruff + pytest
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -48,6 +48,7 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen
       - run: uvx ruff check .
+      - run: uv run python -m pytest tests/ -q
 
   mermaid:
     name: README.md — Mermaid syntax

@@ -20,6 +20,7 @@ const SEGMENT_COLORS = {
   network: "#67E8F9", // cyan-300
   sdk_append: "#34D399", // emerald-400
   hpa_flush: "#29B5E8", // Snowflake brand blue
+  vm_overhead: "#94A3B8", // slate-400 — VM handler overhead (parse/book/response)
   it_poll: "#FBBF24", // amber-400
   render: "#A78BFA", // violet-400 — React diff/paint (the win vs Streamlit)
 };
@@ -110,16 +111,30 @@ export function LatencyTimeline() {
           borderWidth: 1,
         },
         {
-          label: "4 · IT poll",
-          data: latencyBars.map((b) => b.it_poll_ms),
-          backgroundColor: SEGMENT_COLORS.it_poll,
+          // VM handler time not in append/flush: parse + book recompute +
+          // concurrency excess + response build. Makes the stack sum to the
+          // real click→POST-done round-trip (network + sdk + flush + this).
+          label: "4 · VM overhead",
+          data: latencyBars.map((b) => b.vm_overhead_ms),
+          backgroundColor: SEGMENT_COLORS.vm_overhead,
           borderColor: "#0f172a",
           borderWidth: 1,
         },
         {
-          label: "5 · React render",
+          // Optimistic paint fires at flush-ack (before the row is queryable in
+          // the IT) — drawn ahead of the verify segment.
+          label: "5 · React render (optimistic paint)",
           data: latencyBars.map((b) => b.render_ms),
           backgroundColor: SEGMENT_COLORS.render,
+          borderColor: "#0f172a",
+          borderWidth: 1,
+        },
+        {
+          // IT visibility arrives async via WS `it_visible`; it overlaps the
+          // paint above, so click → verified wall-clock = 1+2+3+4+6 (not +render).
+          label: "6 · IT poll (verify · concurrent)",
+          data: latencyBars.map((b) => b.it_poll_ms),
+          backgroundColor: SEGMENT_COLORS.it_poll,
           borderColor: "#0f172a",
           borderWidth: 1,
         },

@@ -39,6 +39,8 @@ export function HpaStatus() {
       {hpaStatus.channel_count > 0 && (
         <p className="text-xs text-slate-500 mt-1">
           {hpaStatus.channel_count} channels · {hpaStatus.pipe_name || "—"}
+          <br />
+          <span className="text-slate-600">+ POSITION_BOOK-STREAMING (parallel write-through)</span>
         </p>
       )}
     </div>

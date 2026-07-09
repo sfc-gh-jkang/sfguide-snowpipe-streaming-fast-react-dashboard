@@ -85,6 +85,28 @@ function bookCte(tt: string = ""): string {
     )`;
 }
 
+/**
+ * Pre-aggregated book CTE — reads the latest write-through row per position from
+ * POSITION_BOOK (the second interactive table the producer maintains via a
+ * parallel HPA channel). This is the "Interactive Tables replace Redis" serving
+ * path made the DEFAULT: a single indexed scan of pre-computed rows (the Redis
+ * GET analog, ~19 ms p50), NOT a query-time rollup of RAW_EVENTS. Emits the
+ * identical `book` columns as bookCte so the tile SELECTs are unchanged, and
+ * stays real-time — write-through, no TARGET_LAG refresh lag (min 60 s). The
+ * windowed rollup (bookCte) remains available in the Serving-strategy panel to
+ * prove all three paths return identical totals.
+ */
+function bookPreaggCte(): string {
+  return `
+    WITH book AS (
+      SELECT
+        POSITION_ID, ISSUER, SECTOR, TRANCHE, PAR_AMOUNT, FUND, WATCHLIST,
+        CURRENT_MARK, OPENING_MARK, MARK_CHANGE_BPS, PNL_TODAY, RATING
+      FROM ${SCHEMA}.POSITION_BOOK
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY POSITION_ID ORDER BY BOOK_TS DESC) = 1
+    )`;
+}
+
 export function tape_query(limit: number = 30): string {
   return `
     SELECT
@@ -112,7 +134,7 @@ export function tape_query(limit: number = 30): string {
 }
 
 export function pnl_today(): string {
-  return `${bookCte()}
+  return `${bookPreaggCte()}
     SELECT
         ROUND(SUM(PNL_TODAY), 2) AS TOTAL_PNL,
         COUNT(*) AS POSITION_COUNT,
@@ -123,7 +145,7 @@ export function pnl_today(): string {
 }
 
 export function sector_exposure(): string {
-  return `${bookCte()}
+  return `${bookPreaggCte()}
     SELECT
         SECTOR,
         ROUND(SUM(PAR_AMOUNT), 0) AS TOTAL_PAR,
@@ -136,7 +158,7 @@ export function sector_exposure(): string {
 }
 
 export function top_marks(n: number = 10): string {
-  return `${bookCte()}
+  return `${bookPreaggCte()}
     SELECT
         POSITION_ID,
         ISSUER,
@@ -153,7 +175,7 @@ export function top_marks(n: number = 10): string {
 }
 
 export function watchlist(): string {
-  return `${bookCte()}
+  return `${bookPreaggCte()}
     SELECT
         POSITION_ID,
         ISSUER,
@@ -253,6 +275,107 @@ export function day_metrics(): string {
         (SELECT COALESCE(ROUND(SUM(QTY * PRICE), 2), 0) FROM recent_events
          WHERE EVENT_TYPE = 'TRADE') AS TOTAL_NOTIONAL_TODAY
     `;
+}
+
+// =========================================================================
+// Three serving strategies for the position-book rollup — surfaced live in the
+// app's ServingStrategyComparison panel. All three return the IDENTICAL summary
+// shape (TOTAL_PNL, POSITION_COUNT, GAINERS, LOSERS) so the app can prove they
+// agree while timing each. All read interactive tables on the interactive WH.
+//
+//   1. windowed  — query-time rollup via window functions (bookCte). Freshest,
+//                  reads RAW_EVENTS, recomputes the book on every read.
+//   2. preagg    — reads the POSITION_BOOK interactive table the producer
+//                  write-throughs (pre-aggregated rows, zero refresh lag).
+//   3. optimized — query-time rollup via a single GROUP BY + MAX_BY (no window,
+//                  no self-joins), reads RAW_EVENTS. Cheaper than #1, same data.
+// =========================================================================
+
+const BOOK_SUMMARY_SELECT = `
+    SELECT
+        ROUND(SUM(PNL_TODAY), 2) AS TOTAL_PNL,
+        COUNT(*) AS POSITION_COUNT,
+        SUM(CASE WHEN PNL_TODAY > 0 THEN 1 ELSE 0 END) AS GAINERS,
+        SUM(CASE WHEN PNL_TODAY < 0 THEN 1 ELSE 0 END) AS LOSERS
+    FROM book`;
+
+/** Strategy 1 — query-time window rollup on RAW_EVENTS (current default). */
+export function book_summary_windowed(): string {
+  return `${bookCte()}${BOOK_SUMMARY_SELECT}`;
+}
+
+/**
+ * Strategy 3 — query-time rollup on RAW_EVENTS via a single GROUP BY + MAX_BY.
+ * MAX_BY(expr, key) returns expr from the row with the max key and ignores rows
+ * whose key is NULL, so nulling the key for non-matching event types yields the
+ * latest MARK / latest CREDIT_EVENT per position without window functions or
+ * self-joins. Emits the same `book` columns as bookCte.
+ */
+export function book_summary_optimized(): string {
+  return `
+    WITH ev AS (
+      SELECT *
+      FROM ${SCHEMA}.RAW_EVENTS
+      WHERE EVENT_TS >= DATEADD('hour', -24, SYSDATE())
+    ),
+    agg AS (
+      SELECT
+        POSITION_ID,
+        MAX_BY(ISSUER, EVENT_TS)         AS ISSUER,
+        MAX_BY(SECTOR, EVENT_TS)         AS SECTOR,
+        MAX_BY(TRANCHE, EVENT_TS)        AS TRANCHE,
+        MAX_BY(PAR_AMOUNT, EVENT_TS)     AS PAR_AMOUNT,
+        MAX_BY(FUND, EVENT_TS)           AS FUND,
+        MAX_BY(WATCHLIST, EVENT_TS)      AS WATCHLIST,
+        MAX_BY(BASELINE_MARK, EVENT_TS)  AS BASELINE_MARK,
+        MAX_BY(CURRENT_RATING, EVENT_TS) AS CURRENT_RATING,
+        MAX_BY(CASE WHEN EVENT_TYPE = 'MARK' THEN NEW_MARK END,
+               CASE WHEN EVENT_TYPE = 'MARK' THEN EVENT_TS END)          AS LATEST_MARK,
+        MAX_BY(CASE WHEN EVENT_TYPE = 'CREDIT_EVENT' THEN TO_RATING END,
+               CASE WHEN EVENT_TYPE = 'CREDIT_EVENT' THEN EVENT_TS END)  AS LATEST_RATING
+      FROM ev
+      GROUP BY POSITION_ID
+    ),
+    book AS (
+      SELECT
+        POSITION_ID, ISSUER, SECTOR, TRANCHE, PAR_AMOUNT, FUND, WATCHLIST,
+        COALESCE(LATEST_MARK, BASELINE_MARK)                            AS CURRENT_MARK,
+        BASELINE_MARK                                                   AS OPENING_MARK,
+        (COALESCE(LATEST_MARK, BASELINE_MARK) - BASELINE_MARK) * 100    AS MARK_CHANGE_BPS,
+        (COALESCE(LATEST_MARK, BASELINE_MARK) - BASELINE_MARK)
+          / 100.0 * PAR_AMOUNT                                          AS PNL_TODAY,
+        COALESCE(LATEST_RATING, CURRENT_RATING)                         AS RATING
+      FROM agg
+    )${BOOK_SUMMARY_SELECT}`;
+}
+
+/**
+ * Strategy 2 — pre-aggregated read from the POSITION_BOOK interactive table the
+ * producer write-throughs. Each row is already the fully combined book line, so
+ * the read is just the latest row per position (append-only stream) then a SUM.
+ * Fully fresh: the producer writes the pre-agg row at ingest time (no TARGET_LAG).
+ */
+export function book_summary_preagg(): string {
+  return `
+    WITH book AS (
+      SELECT POSITION_ID, PNL_TODAY
+      FROM ${SCHEMA}.POSITION_BOOK
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY POSITION_ID ORDER BY BOOK_TS DESC) = 1
+    )${BOOK_SUMMARY_SELECT}`;
+}
+
+/** Freshness lag (seconds since newest row) for each serving source. */
+export function raw_events_lag(): string {
+  return `
+    SELECT GREATEST(0, TIMESTAMPDIFF('second', MAX(EVENT_TS), SYSDATE())) AS LAG_SECONDS
+    FROM ${SCHEMA}.RAW_EVENTS
+    WHERE EVENT_TS >= DATEADD('hour', -24, SYSDATE())`;
+}
+
+export function position_book_lag(): string {
+  return `
+    SELECT GREATEST(0, TIMESTAMPDIFF('second', MAX(BOOK_TS), SYSDATE())) AS LAG_SECONDS
+    FROM ${SCHEMA}.POSITION_BOOK`;
 }
 
 // =========================================================================

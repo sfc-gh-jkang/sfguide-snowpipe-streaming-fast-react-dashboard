@@ -4,9 +4,9 @@
 
 > **Feature status:** Snowpipe Streaming HPA, Interactive Tables, Cortex Agent, Cortex Search Service, Cortex Analyst (Semantic Views), and SPCS Snowflake Apps are all GA as of May 2026. No Preview features required to run this demo.
 
-A real-time credit-trading dashboard. Operators on a credit desk fire trades, marks, and credit events; rows commit to Snowflake via Snowpipe Streaming HPA in ~30 ms; the dashboard shows the trade tape, P&L, sector exposure, top marks, watchlist, and a Cortex Agent chat that answers questions about the position book.
+A real-time credit-trading dashboard. Operators on a credit desk fire trades, marks, and credit events; rows commit to Snowflake via Snowpipe Streaming HPA in ~0.3 s (`wait_for_flush()`) and become queryable on the interactive warehouse ~1.3 s after commit (streaming-visibility lag, p50; varies ~0.7–2.4 s); the dashboard shows the trade tape, P&L, sector exposure, top marks, watchlist, and a Cortex Agent chat that answers questions about the position book.
 
-> Snowpipe Streaming **HPA** + **Interactive Tables** + **Cortex Agent** + **Next.js on SPCS** — same data pipeline as the parent fork, but the just-fired row appears optimistically in **~0.4 s** (click pipeline + a ~10 ms React render step, measured live in-browser) vs Streamlit's ~1.6 s full-script rerun — **~4× faster to see the row**, with full-dashboard freshness comparable (Streamlit numbers are a historical baseline from the parent demo — see provenance note below).
+> Snowpipe Streaming **HPA** + **Interactive Tables** + **Cortex Agent** + **Next.js on SPCS** — same data pipeline as the parent fork. The just-fired row **paints optimistically in ~10 ms** (instant perceived feedback) instead of blocking on Streamlit's ~1.6 s full-script rerun. The honest **click → interactive-table-confirmed** time is **~1.5–2 s** (p50), dominated by the interactive table's **~1.3 s streaming-visibility lag** (p50; varies ~0.7–2.4 s) — the time a just-committed streamed row takes to become queryable on the interactive warehouse. That lag is the price of a durable write-through (not an in-memory cache), and the parent Streamlit demo pays the same lag. All fork numbers are measured live in-browser (Streamlit figures are a historical baseline from the parent demo — see provenance note below).
 
 This is a performance fork of the parent demo `sfguide-snowpipe-streaming-interactive-demo` (Streamlit-on-Snowflake). The VM producer, the HPA SDK ingest path, the Interactive Tables, and the Cortex Agent spec are unchanged. The presentation layer is what's different: Streamlit on Snowflake is replaced by a Next.js 14 React app on SPCS, served behind Snowsight's OAuth gate. Tile updates run on a 200 ms server-side polling loop with WebSocket diff-push to the browser; full-snapshot fetches run client-side every 1.5 s as a periodic truth source.
 
@@ -25,9 +25,10 @@ A typical real-time credit-desk pipeline is built from four separate vendors sti
 
 What you see when you run this demo:
 
-1. Click TRADE in the React dashboard → row commits via Snowpipe Streaming HPA in ~30 ms (`wait_for_flush()`)
+1. Click TRADE in the React dashboard → row paints optimistically in ~10 ms; commits via Snowpipe Streaming HPA in ~0.3 s (`wait_for_flush()`); becomes queryable on the interactive WH ~1.3 s after commit (streaming visibility, p50; varies ~0.7–2.4 s)
 2. Server-side reader polls the Interactive Warehouse every 200 ms → diffs against last hash → pushes only changed rows over WebSocket → tiles repaint in <16 ms
 3. Switch to "Ask the Book" tab → ask "What was our most recent trade?" → Cortex Agent calls Cortex Analyst (semantic view) + Cortex Search → streams answer back in 5-10 s
+4. Open the "How fresh & fast?" tab → hit **Fire & measure** → every freshness/latency/lag component is explained in plain English, shown with live measured values, and reconciled so the parts add up to the end-to-end
 
 ## Why this fork exists
 
@@ -35,11 +36,14 @@ The latency table below mixes three number sources — live in-browser measureme
 
 | Segment | Parent (Streamlit) | This fork (React) |
 |---|---|---|
-| HPA `wait_for_flush()` commit | ~30ms | ~30ms (unchanged) |
+| HPA `wait_for_flush()` commit | ~30ms | **~0.3s** (dual-table max: RAW_EVENTS + POSITION_BOOK concurrent; single-table best-case ~30ms) |
 | Serving-query server-side time on **Interactive WH** | 60ms p50 / 95ms p95 *(historical: old single-row lookup, parent demo, 2026-05-19)* | **130ms p50 / 151ms p95** (n=30, book rollup, re-benchmarked 2026-07-07) |
 | Same serving query on **Standard WH** (the in-app A/B toggle) | — | **295ms p50 / 872ms p95** (n=30) → Interactive ~2.3× faster p50, ~5.8× faster p95 |
 | Streamlit full-script rerun | **1646ms p50 / 3391ms p95** *(historical, n=88 bursts, parent demo, 2026-05-19)* | n/a |
-| **Click → optimistic row visible** | ~1646ms (rerun must finish first) | **~0.4s** (click pipeline + ~10ms render step, measured live) → **~4× faster to see the row** |
+| **Click → optimistic paint** (grey pending row) | ~1646ms (rerun must finish first) | **~10ms** (immediate client prepend, measured live) → feels instant |
+| Click → committed (HPA flush-ack) | — | **~0.4s** (network + SDK append + flush) |
+| Commit → queryable on interactive WH (streaming-visibility lag) | ~1.3s p50 (parent pays the same lag) | **~1.3s p50, ~0.7–2.4s** (measured live — the dominant, variable end-to-end term) |
+| **Click → interactive-table-confirmed on screen** | ~1646ms rerun + the same ~1.3s visibility | **~1.5–2s p50** (network + SPCS↔VM tunnel + flush + ~1.3s visibility + render, measured live) |
 | React render/paint step (one row) | (part of the 1646ms rerun) | **~10ms** (RAF×2, measured live in-browser) — a render step, *not* a 1:1 comparison against a full rerun |
 | Click → tape-row-visible (tape refresh) | ~1646ms (rerun completes, all rows redrawn) | ~2400ms (1.5s polling + ~800ms fetch + ~50ms reconcile) |
 | Cortex Agent Q&A | 5-15s | 5-15s (unchanged) |
@@ -49,19 +53,40 @@ The latency table below mixes three number sources — live in-browser measureme
 - **Re-benchmarked 2026-07-07 on the live `aws_spcs` account (current interactive-`RAW_EVENTS` architecture):** the Interactive-vs-Standard warehouse rows above (book-rollup serving query, 30× per WH, server-side `TOTAL_ELAPSED_TIME` via `QUERY_HISTORY_BY_SESSION`). Constants live in `web/src/lib/baseline.ts` → `REACT_FORK_SERVING_MS`.
 - **Historical stored baseline (NOT re-measured live):** all Streamlit figures (`1646/3391ms` rerun; `60/95ms` and `98/241ms` per-WH profiles) were measured 2026-05-19 on the parent Streamlit-on-Snowflake demo, on a **different account** and the **old architecture**. The parent demo is not deployed on this account (a 30-day `QUERY_HISTORY` scan for `STPLATSTREAMLIT*` returned zero rows), so they cannot be refreshed here. They're an illustrative comparison, clearly labeled as such in the app.
 
-**Honest read:** Streamlit's full-script rerun is the dominant cost — 1.6 s typical, 3.4 s p95 (historical baseline). The React fork's genuine win is that the just-fired row **appears optimistically in ~0.4 s vs Streamlit's ~1.6 s rerun (~4× faster to see the row)**; the React render/paint step itself is ~10 ms — a render step, not a fair 1:1 against a full rerun. On full-dashboard data freshness the two are comparable, and React additionally stays fresh between clicks (1.5 s polling) while Streamlit goes stale until the next rerun. On the interactive-vs-standard warehouse comparison, the Interactive WH is ~2.3× faster at p50 and ~5.8× faster at p95 for the identical serving query — measured fresh on the current architecture.
+**Honest read:** the React fork's genuine UX win is that the just-fired row **paints optimistically in ~10 ms** (instant perceived feedback) while Streamlit blocks the whole UI on a ~1.6 s full-script rerun per interaction. But do **not** confuse the optimistic paint with the row actually being queryable: the honest **click → interactive-table-confirmed** time is **~1.5–2 s** (p50), dominated by the interactive table's **~1.3 s streaming-visibility lag** (p50; varies ~0.7–2.4 s) (a just-committed streamed row takes ~1.3 s p50 to become queryable on the interactive WH). That lag is inherent to the durable write-through path and the parent Streamlit demo pays it too — React just hides it behind the optimistic paint instead of blocking. React also stays fresh between clicks (1.5 s polling) while Streamlit goes stale until the next rerun. On the interactive-vs-standard warehouse comparison, the Interactive WH is ~2.3× faster at p50 and ~5.8× faster at p95 for the identical serving query — measured fresh on the current architecture.
 
 ## Target latency budget
 
 | Segment | Target | How |
 |---|---|---|
 | React render/paint step (after POST returns) | <50ms | React state diff + RAF×2 paint of the optimistic row |
-| Click → optimistic row visible | ~0.4s | Click pipeline (net + SDK + flush) + the ~10ms render step |
-| Click → row queryable from any connection | ~150-300ms | EAI to VM tunnel + SDK `wait_for_flush` |
+| Click → optimistic paint (grey pending row) | ~10ms | Immediate client-side prepend, before the network |
+| Click → committed (HPA flush-ack) | ~0.4s | Click pipeline (net + SDK + flush) |
+| Click → row queryable on interactive WH | ~1.5–2s p50 | Commit + interactive-table streaming-visibility lag (~1.3s p50, ~0.7–2.4s) |
 | Click → row visible in tape (polling cadence) | ~2400ms | Server-side 1.5s polling, full snapshot fetch, Zustand reconcile |
 | React tile re-render (memo'd diff) | <16ms | `React.memo` per slice, no full-page rerun |
 
-**React render/paint step p50: <50 ms (typical 8-15 ms measured live). Click → optimistic row visible ≈ ~0.4 s (click pipeline + render step).**
+**React render/paint step p50: <50 ms (typical 8-15 ms measured live). Click → optimistic paint ≈ ~10 ms; click → interactive-table-confirmed ≈ ~1.5–2 s (dominated by the ~1.3 s streaming-visibility lag, which varies ~0.7–2.4 s).**
+
+## Three serving strategies (all fresh — no refresh lag)
+
+The dashboard serves the position-book P&L rollup **three different ways** on the Interactive Warehouse, shown live and side-by-side in the app's **Serving strategy comparison** panel. All three read interactive tables, all three return the identical book (the panel proves it with a "totals match ✓" check), and all three are **equally fresh** — there is no `TARGET_LAG` dynamic table anywhere, so a just-fired trade becomes queryable in every strategy within the same ~1–2 s streaming-visibility window (not on a refresh schedule). Once a row is queryable, the read itself is the p50/p95 below (19-130 ms).
+
+**The live dashboard tiles default to strategy #2 — the pre-agg write-through read of `POSITION_BOOK`** (a single indexed scan of pre-computed rows, the "Redis GET" analog, ~19 ms p50). The query-time rollups (#1, #3) exist in the comparison panel to prove all three return identical totals; they are not the default serving path. This is the honest answer to "Interactive Tables replace Redis": the *default* read is a pre-computed row lookup, not an ad-hoc aggregation.
+
+| # | Strategy | Reads | How | p50 | p95 |
+|---|---|---|---|---|---|
+| 2 | **Pre-agg write-through** | `POSITION_BOOK` | Producer maintains a running per-position book in memory and streams the pre-computed book line into a second interactive table on every event (parallel HPA channel). Read = latest row per position. | **19 ms** | 69 ms |
+| 3 | **Optimized query-time** | `RAW_EVENTS` | Single `GROUP BY POSITION_ID` + `MAX_BY(...)` rollup — no window functions, no self-joins. | 43 ms | 53 ms |
+| 1 | **Query-time window rollup** | `RAW_EVENTS` | `QUALIFY ROW_NUMBER()` window rollup (the freshest-from-raw path; shown for comparison, was the old default). | 88 ms | 108 ms |
+
+*(n=30 each, server-side `TOTAL_ELAPSED_TIME` via `QUERY_HISTORY_BY_SESSION` on `CREDIT_DEMO_INT_WH` XSMALL, re-benchmarked 2026-07-08. Session-scoped so the live 200 ms reader poll is excluded. These are **warehouse-execution** times; the in-app number is larger because it's the full round-trip incl. the SPCS→Snowflake REST call + network.)*
+
+**Latency ≠ freshness — don't conflate them.** The p50s above are **read latency** (how long a query takes). **Freshness** is separate: event → visible end-to-end, and the app shows it as **two stages × two anchors**. Stages: event→**queryable** (readable by any query = SDK append + HPA `wait_for_flush` commit + interactive-table streaming visibility, ~1.3 s p50 / ~0.7–2.4 s, visibility-dominated) and event→**visualized** (+ browser paint on the WebSocket push, or up to the ~1.5 s poll). Anchors: **pipeline** (from when the event is produced — classic data freshness) and **user** (from your click — adds the browser→VM network hop, i.e. what the person at the screen feels). The two anchors differ by exactly that network hop. Crucially there is **no `TARGET_LAG` refresh cycle** anywhere ([a dynamic table's minimum staleness target is 60 s](https://docs.snowflake.com/en/user-guide/dynamic-tables/target-lag)), and **all three strategies share the same freshness** because they read data committed by the same streaming path — the pre-agg path buys read *speed*, not freshness. The app's "How this works" pop-down defines latency vs. lag vs. freshness with doc links.
+
+**The streaming-visibility lag — mechanism (measured + doc-grounded, 2026-07-08).** A just-committed streamed row is not queryable on the interactive warehouse instantly; the new micropartition must be **incorporated into the warehouse's warm served state** first ([Snowflake docs: interactive tables and interactive warehouses](https://docs.snowflake.com/en/user-guide/interactive) — cache-warming priority explicitly includes *"newly added micropartitions through … data ingestion"*). Burst experiments (staggered commits → shared visible instants) show this incorporation happens in **irregular batches**, observed cadence **~0.35–1.3 s**, so a row becomes queryable at the next batch after its commit. That's why commit→queryable is **variable: p50 ~1.3 s, range ~0.7–2.4 s** (n=32), not a constant. It is **not** the `TARGET_LAG` refresh (min 60 s) — that knob only applies to interactive tables that auto-refresh *from a source table*; `RAW_EVENTS`/`POSITION_BOOK` are **direct Snowpipe Streaming targets**, so the batch cadence is internal to Snowflake and **not user-tunable**. The only lever we hold is keeping the interactive WH warm (`AUTO_SUSPEND = 86400`). The optimistic paint (~10 ms) hides this lag from the user; it does not remove it, and the parent Streamlit demo pays the same lag.
+
+**Why this answers "Interactive Tables replace Redis":** the pre-agg write-through (#2) is the true Redis analogy — the *writer* maintains the hot cache, so reads are a cheap scan of pre-computed rows (**~4.6× faster than the query-time window rollup at p50**). Crucially it stays that fast *without* sacrificing freshness: a `TARGET_LAG` dynamic table would pre-aggregate too, but would add ingestion→refresh staleness. Write-through keeps the pre-agg **and** the zero-lag freshness this demo is about. Strategies #1 and #3 show that even pure query-time aggregation on a streaming interactive table is sub-100 ms on a warm interactive warehouse.
 
 ## What this demo proves
 
@@ -69,8 +94,8 @@ A 10-second scan of which Snowflake products this demo exercises and what each o
 
 | # | Snowflake product | What it does here | Why it matters |
 |---|---|---|---|
-| 1 | **Snowpipe Streaming HPA** (High-Performance Architecture) | Channel-API ingest from a Python SDK directly into `RAW_EVENTS` (an Interactive Table) via the auto-PIPE `RAW_EVENTS-STREAMING`. ~30 ms commit latency on `wait_for_flush()`. No landing table, no COPY INTO. | One ingest path for both micro-batch and per-row streaming; no Kafka, no Connect, no schema registry |
-| 2 | **Interactive Tables** | `RAW_EVENTS` is itself the Interactive Table — Snowpipe Streaming writes rows straight into it, and the dashboard serves every tile from it. Clustered by `(EVENT_TS)`; position attributes are denormalized onto each event so tile queries need no dimension join. Sub-second concurrent reads. | Replaces a Redis cache; the same table is the system of record AND the hot serving layer |
+| 1 | **Snowpipe Streaming HPA** (High-Performance Architecture) | Channel-API ingest from a Python SDK directly into `RAW_EVENTS` (an Interactive Table) via the auto-PIPE `RAW_EVENTS-STREAMING`. ~0.3 s commit latency on `wait_for_flush()` (dual-table max). No landing table, no COPY INTO. | One ingest path for both micro-batch and per-row streaming; no Kafka, no Connect, no schema registry |
+| 2 | **Interactive Tables** | Two interactive tables, both streaming targets: `RAW_EVENTS` (every event, served by query-time rollup) and `POSITION_BOOK` (the producer write-throughs the pre-computed per-position book line on every event). The dashboard serves the book **three ways** off these — see "Three serving strategies" below. Both clustered for sub-second concurrent reads. | Replaces a Redis cache the fresh way: the *writer* maintains the hot pre-agg cache (`POSITION_BOOK`), so reads are pre-computed AND zero-staleness — no `TARGET_LAG` refresh |
 | 3 | **Interactive Warehouses** | `CREDIT_DEMO_INT_WH` stays warm to serve the 200 ms server-side polling reader against `RAW_EVENTS`. | No JVM, no watermarks, no state-store recovery — just a warehouse that doesn't suspend |
 | 4 | **SPCS Snowflake App** | Hosts the Next.js 14 dashboard on a `CPU_X64_XS` compute pool. OAuth via `/snowflake/session/token`. | Bring-your-own-runtime UI, deployed with `snow app deploy`, no separate infra to operate |
 | 5 | **Cortex Agent** | `CREDIT_AGENT` orchestrates Cortex Analyst + Cortex Search to answer NL questions about the book. | Replaces a third-party text-to-SQL bot + BI semantic-model tier with one Snowflake-native object |
@@ -101,7 +126,7 @@ A 10-second scan of which Snowflake products this demo exercises and what each o
    [ Producer VM (any cloud)        ]       │  └─ search tool    │
    [   FastAPI + 4-channel HPA SDK  ]       └─────────┬──────────┘
         │ wait_for_flush                              │
-        │ keypair JWT, ~30ms commit                   │ text-to-SQL
+        │ keypair JWT, ~0.3s commit                   │ text-to-SQL
         ▼                                             ▼
    ┌─────────────────────────────────┐      ┌────────────────────┐
    │ Snowpipe Streaming HPA Auto-PIPE│      │  CREDIT_SV         │
@@ -143,8 +168,10 @@ flowchart TB
     EAI["External Access<br/>Integration"]
     CF["Cloudflare Tunnel"]
     VM["Producer VM<br/>FastAPI + 4-ch HPA SDK"]
-    PIPE["Snowpipe Streaming HPA<br/>Auto-PIPE"]
-    RAW[("RAW_EVENTS<br/>Interactive Table<br/>(streaming target + serving)")]
+    PIPE["Snowpipe Streaming HPA<br/>Auto-PIPE RAW_EVENTS-STREAMING"]
+    BPIPE["Auto-PIPE<br/>POSITION_BOOK-STREAMING<br/>(parallel channel)"]
+    RAW[("RAW_EVENTS<br/>Interactive Table<br/>(strategies 1 + 3: query-time rollup)")]
+    BOOK[("POSITION_BOOK<br/>Interactive Table<br/>(strategy 2: pre-agg write-through)")]
     POS[("POSITIONS_DIM<br/>62 loan positions<br/>(standard dim)")]
     INTWH["Interactive Warehouse<br/>(stays warm)"]
     AGENT["CREDIT_AGENT<br/>(orchestrator)"]
@@ -157,12 +184,15 @@ flowchart TB
     UI -->|POST /api/ingest| EAI
     EAI -->|allowed-host rule| CF
     CF -->|QUIC outbound| VM
-    VM -->|wait_for_flush ~30ms| PIPE
+    VM -->|wait_for_flush ~0.3s| PIPE
     PIPE --> RAW
+    VM -->|parallel write-through| BPIPE
+    BPIPE --> BOOK
 
     %% Server-side reader → WS push (200ms diff)
     READER -.->|200ms poll| INTWH
     INTWH -.-> RAW
+    INTWH -.->|strategy 2 pre-agg| BOOK
     READER -.->|hash + diff| WSB
     WSB -.->|WS push| Browser
 
@@ -182,7 +212,7 @@ flowchart TB
     classDef ext  fill:#F39C12,stroke:#B8740F,color:#fff,stroke-width:2px
     classDef ai   fill:#9B59B6,stroke:#6E3D81,color:#fff,stroke-width:2px
     classDef user fill:#34495E,stroke:#1A2530,color:#fff
-    class UI,WSB,READER,EAI,PIPE,RAW,POS,INTWH snow
+    class UI,WSB,READER,EAI,PIPE,BPIPE,RAW,BOOK,POS,INTWH snow
     class CF,VM ext
     class AGENT,SV,SEARCH ai
     class Browser user
@@ -226,7 +256,7 @@ The other 15 identifiers in `.env.example` (database, schema, warehouse, role, p
 This is idempotent and does everything end-to-end:
 
 1. Renders `setup.sql`, `semantic_view.sql`, and `web/snowflake.yml` from your `.env`
-2. Runs `setup.sql` — creates database, schema, warehouses (standard + Interactive), roles (`DASHBOARD_RL`, `CREDIT_INGEST_RL`), compute pool, network rules, External Access Integration, the `RAW_EVENTS` Interactive Table (streaming target + serving layer) + `POSITIONS_DIM`, Cortex Search service, Cortex Agent, `APP_CONFIG` runtime table, and all grants
+2. Runs `setup.sql` — creates database, schema, warehouses (standard + Interactive), roles (`DASHBOARD_RL`, `CREDIT_INGEST_RL`), compute pool, network rules, External Access Integration, the `RAW_EVENTS` + `POSITION_BOOK` Interactive Tables (both streaming targets) + `POSITIONS_DIM`, Cortex Search service, Cortex Agent, `APP_CONFIG` runtime table, and all grants
 3. Runs `semantic_view.sql` — creates the `CREDIT_SV` semantic view used by the agent for text-to-SQL
 4. Pushes `INGEST_TUNNEL_HOST` + `INGEST_API_KEY` into `APP_CONFIG`
 5. Updates the EAI network rule to allow egress to your tunnel host
@@ -406,8 +436,10 @@ At a typical effective enterprise rate (~$2/credit) this demo idle costs roughly
 | `deploy-app.sh` | Render templates → run setup SQL (with `--bootstrap`) → push runtime config → `snow app deploy` |
 | `.env.example` | All 23 envsubst variables with documented defaults |
 | `web/server.js` | Custom standalone server that monkey-patches Next.js's `server.js` to handle WebSocket upgrades on `/api/ws` |
-| `web/src/app/layout.tsx` | Root layout with the two-tab nav (Live Credit Desk / Ask the Book) and global WS provider |
+| `web/src/app/layout.tsx` | Root layout with the four-tab nav (Demo / Live Credit Desk / Ask the Book / How fresh & fast?) and global WS provider |
 | `web/src/app/page.tsx` | Live Credit Desk page — KPI tiles, latency timeline, live tape, sector donut, top marks, watchlist |
+| `web/src/app/demo/page.tsx` | Demo control room — Fresh/Fast cards, Live Market simulator, interactive-latency + serving-strategy panels |
+| `web/src/app/latency/page.tsx` | "How fresh & fast?" — plain-English explainer of every freshness/latency/lag component with a Fire & measure widget and a per-event "do the parts add up?" reconciliation |
 | `web/src/app/ask/page.tsx` | Ask the Book page — Cortex Agent chat with SSE streaming |
 | `web/src/app/api/health/` | Liveness probe (returns `{ok: true, ...}`) |
 | `web/src/app/api/warmup/` | Pre-warms the Snowflake connection + reader on first request |
@@ -415,7 +447,9 @@ At a typical effective enterprise rate (~$2/credit) this demo idle costs roughly
 | `web/src/app/api/snapshot/standard/` | Snapshot rollup using the standard warehouse (cold-start visible) |
 | `web/src/app/api/snapshot/at/` | Same rollup using the Interactive warehouse (stays warm) |
 | `web/src/app/api/ingest/` | POST proxy to VM tunnel (optimistic + verified WS broadcast) |
+| `web/src/app/api/ingest-verified/` | Honest click→IT-confirmed path: append + tight-poll RAW_EVENTS until queryable, return the row + full timing breakdown (powers the Fire & measure widget) |
 | `web/src/app/api/ingest-batch/` | Same as `/api/ingest` but accepts an array — used by stress-test buttons |
+| `web/src/app/api/serving-compare/` | Runs the book three ways (windowed / pre-agg / MAX_BY) and returns latencies + a totals-match check |
 | `web/src/app/api/agent/stream/` | SSE proxy to Cortex Agent `:run` endpoint |
 | `web/src/app/api/observability/` | Pipeline observability metrics for the diagnostic panel |
 | `web/src/app/api/debug/` | Internal debug endpoints (config dump, connection test) |
@@ -442,13 +476,14 @@ At a typical effective enterprise rate (~$2/credit) this demo idle costs roughly
 |---|---|---|
 | 0:00 | Open dashboard | 62-position book loads instantly (WS connected, initial snapshot pushed) |
 | 0:30 | Point at the architecture | "Same HPA pipeline as before — the only change is what renders the data" |
-| 1:00 | Click **TRADE** | Latency timeline breaks down the round trip (net + SDK + flush). Optimistic row appears grey in ~0.4s, then goes green when the IT confirms; the React render step is ~10ms |
-| 2:00 | Click 5x rapidly | All 5 bars stack. Each render/diff is a few ms; rows appear optimistically in well under half a second. "That's the React diff — no full-page rerun" |
-| 3:00 | Open parent fork in adjacent tab | Click the trade button there. Watch the 1.6-3.4s rerun. "Same data, same HPA commit — different framework" |
+| 1:00 | Click **TRADE** | Latency timeline breaks down the round trip (net + SDK + flush). Optimistic grey row appears in ~10ms, then goes green when the IT confirms — the honest click→interactive-table-confirmed is ~1.5–2s, dominated by the ~1.3s streaming-visibility lag (varies ~0.7–2.4s); the React render step is ~10ms |
+| 2:00 | Click 5x rapidly | All 5 bars stack. Each render/diff is a few ms; rows appear optimistically in ~10ms. "That's the React diff — no full-page rerun" |
+| 2:30 | Flip **Live market** ON (1–4/s) | The desk now streams marks/trades on its own — tape, KPIs, sector donut, top movers, and the **Serving strategy comparison** all move live. "Every one of these is fed by the same HPA write-through." |
+| 3:00 | Point at **Serving strategy comparison** | Three ways to serve the book (query-time window / pre-agg write-through / MAX_BY), live latency each, "totals match ✓", freshness ~1.3s p50 (streaming-visibility lag, varies ~0.7–2.4s) — all equally fresh, no `TARGET_LAG`. |
 | 4:00 | Switch back to React fork | "That's the A/B. Everything Snowflake-side was already sub-second." |
 | 5:00 | Switch to **Ask the Book** tab | "What is today's P&L by sector?" — Cortex Agent streams tokens via SSE |
 | 6:00 | Fuzzy search | "Show me Apollo's exposure" — same Agent, same Search service |
-| 7:00 | The closer | Click TRADE in the Live Credit Desk tab, switch to Ask the Book and ask "What was our most recent trade?" — same row, shown optimistically on the tile in ~0.4s and findable by the Agent in 5-10 s |
+| 7:00 | The closer | Click TRADE in the Live Credit Desk tab, switch to Ask the Book and ask "What was our most recent trade?" — same row, shown optimistically on the tile in ~10ms (queryable/IT-confirmed ~1.5–2s) and findable by the Agent in 5-10 s |
 
 The Live Credit Desk tab also has **MARK** and **CREDIT** buttons next to TRADE for mark-to-market price updates and credit events (rating changes, defaults, restructurings).
 

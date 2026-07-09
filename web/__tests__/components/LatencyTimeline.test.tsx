@@ -45,6 +45,7 @@ describe("LatencyTimeline", () => {
       network_ms: 1000,
       sdk_appended_ms: 30,
       flush_committed_ms: 250,
+      vm_overhead_ms: 7,
       it_poll_ms: 200,
       render_ms: 10,
     };
@@ -58,16 +59,20 @@ describe("LatencyTimeline", () => {
       datasets: Array<{ label: string; data: number[] }>;
     };
 
-    // 5 datasets: Network, SDK append, HPA flush, IT poll, React render
-    expect(data.datasets).toHaveLength(5);
+    // 6 datasets, in temporal order: Network, SDK append, HPA flush, VM overhead,
+    // React render (optimistic paint), IT poll (verify · concurrent). Render
+    // precedes IT poll because the paint fires at flush-ack, before the row is
+    // queryable in the Interactive Table.
+    expect(data.datasets).toHaveLength(6);
     expect(data.labels).toEqual(["Click #1"]);
 
     // Each dataset has one data point matching the bar's segment
     expect(data.datasets[0].data[0]).toBe(1000); // network_ms
     expect(data.datasets[1].data[0]).toBe(30); // sdk_appended_ms
     expect(data.datasets[2].data[0]).toBe(250); // flush_committed_ms
-    expect(data.datasets[3].data[0]).toBe(200); // it_poll_ms
-    expect(data.datasets[4].data[0]).toBe(10); // render_ms
+    expect(data.datasets[3].data[0]).toBe(7); // vm_overhead_ms
+    expect(data.datasets[4].data[0]).toBe(10); // render_ms (paint, before verify)
+    expect(data.datasets[5].data[0]).toBe(200); // it_poll_ms (verify, concurrent)
   });
 
   it("total equals sum of all segments", () => {
@@ -76,6 +81,7 @@ describe("LatencyTimeline", () => {
       network_ms: 50,
       sdk_appended_ms: 25,
       flush_committed_ms: 150,
+      vm_overhead_ms: 6,
       it_poll_ms: 300,
       render_ms: 8,
     };
@@ -92,6 +98,7 @@ describe("LatencyTimeline", () => {
       sampleBar.network_ms +
       sampleBar.sdk_appended_ms +
       sampleBar.flush_committed_ms +
+      sampleBar.vm_overhead_ms +
       sampleBar.it_poll_ms +
       sampleBar.render_ms;
     expect(total).toBe(expected);
@@ -103,6 +110,7 @@ describe("LatencyTimeline", () => {
       network_ms: 100,
       sdk_appended_ms: 20,
       flush_committed_ms: 200,
+      vm_overhead_ms: 4,
       it_poll_ms: 150,
       render_ms: 0,
     };

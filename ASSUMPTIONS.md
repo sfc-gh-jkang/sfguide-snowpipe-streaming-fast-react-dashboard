@@ -86,14 +86,15 @@ That's the **published SLA** for HPA. The 5 seconds is the floor, not a guarante
 | **t1_post_sent → t1_vm_proxy** | `vm-proxy.ts` resolves config, builds HTTPS POST to cloudflared tunnel | 5-20ms | No (server-side overhead) |
 | **t1_vm_proxy → t1_vm_received** | EAI → Cloudflare edge → tunnel → VM FastAPI | 50-150ms | No (network) |
 | **t1_vm_received → vm_sdk_appended** | StreamingService.stream_row(): hash partition, append_row to channel buffer | **0.2-2ms** | No (in-memory) |
-| **vm_sdk_appended → vm_committed** | `wait_for_flush(timeout=10)`: SDK forces flush; HPA service commits to IT | **0.5-3s** | YES — this is where we optimize |
+| **vm_sdk_appended → vm_committed** | `wait_for_flush(timeout=10)`: SDK forces flush; HPA service commits the rowset (dual-table max: RAW_EVENTS + POSITION_BOOK) | **~0.3s** (30ms-1s, variable) | Somewhat (flush cadence) |
 | **vm_committed → t2_post_returned** | VM returns 200 → `vm-proxy.ts` returns → route handler responds to client | 50-150ms | No (network) |
-| **t2_post_returned → t3_ws_broadcast** | `snowflake-reader.ts` detects new row in 200ms polling loop, hashes diff, broadcasts via WebSocket | 0-200ms | Slightly (poll cadence, currently 200ms) |
+| **vm_committed → row queryable on interactive WH** | **Interactive-table streaming-visibility lag** — the just-committed micropartition is incorporated into the interactive warehouse's warm served state before ANY query (incl. the reader) can see it. Burst tests show incorporation happens in **irregular batches** (~0.35–1.3s cadence), so a row is visible at the next batch after commit → the lag is variable, not constant. NOT `TARGET_LAG` (min 60s, source-refresh only); these are direct streaming targets, so it's internal/not-tunable. Runs concurrently with the POST return above. Measured 2026-07-08, n=32 | **~1.3s** (p50; ~0.7-2.4s, occasional multi-second tail) | No — internal to interactive-table streaming visibility |
+| **row queryable → t3_ws_broadcast** | `snowflake-reader.ts` detects the now-queryable row within one 200ms poll, hashes diff, broadcasts via WebSocket | 0-200ms | Slightly (poll cadence, currently 200ms) |
 | **t3_ws_broadcast → t4_paint** | Browser receives WS message, React re-renders affected components | <10ms | No (client render) |
-| **End-to-end click → visible on dashboard** | Sum of above | **~1.5-4s** with optimizations | — |
+| **End-to-end click → queryable & visible on dashboard** | Dominated by the ~1.3s p50 IT streaming-visibility lag | **~1.5–2s** (p50; ~1-3s) | — |
 
 ### Dual data freshness paths
-1. **Primary (push):** Server-side `snowflake-reader.ts` polls the IT every 200ms, computes stable hashes (excluding time-derived fields like `AGE_SEC`), and broadcasts diffs over WebSocket to all connected browsers. New data appears within one poll cycle (~200ms) of HPA commit.
+1. **Primary (push):** Server-side `snowflake-reader.ts` polls the IT every 200ms, computes stable hashes (excluding time-derived fields like `AGE_SEC`), and broadcasts diffs over WebSocket to all connected browsers. New data appears within one poll cycle (~200ms) of the row becoming **queryable** — which is ~1.3s p50 (varies ~0.7–2.4s) after HPA commit (the interactive-table streaming-visibility lag), not immediately.
 2. **Fallback (pull):** Client-side `/api/snapshot/standard` is fetched periodically (~1.5s) as a truth reconciliation source — ensures the UI stays correct even if a WS message is dropped.
 
 ### What we tuned to hit the lower bound
@@ -102,7 +103,7 @@ That's the **published SLA** for HPA. The 5 seconds is the floor, not a guarante
 3. **Channel pool of 4** sized to position-key hash. Avoids head-of-line blocking; per-position ordering preserved.
 4. **3 warmup events fire at FastAPI startup** so the first real click doesn't pay cold-channel-open cost.
 5. **Interactive Warehouse stays bound to RAW_EVENTS** (not auto-suspended during demo window). Sub-second query response from the very first click.
-6. **HPA server-side commit cost** (~0.5-3s) is the only un-tunable component. This is the Snowflake SLA window.
+6. **The interactive-table streaming-visibility lag** (~1.3s p50, varies ~0.7–2.4s, from commit to queryable) is the only un-tunable, dominant component — inherent to how a streamed row merges into the interactive warehouse's served state. The HPA commit itself (~0.3s) is small by comparison. The optimistic paint (below) hides this lag from the user; it does not remove it.
 7. **Optimistic UI.** The `/api/ingest` route broadcasts a `type: "optimistic"` WS message (status: "pending") immediately on click, before the VM even responds. The Live Tape shows the event instantly with a "pending" badge. A `type: "verified"` message follows after HPA flush ack (~250ms handler latency). A `type: "it_visible"` message fires after the fire-and-forget visibility probe confirms the row is queryable.
 
 ### What we explicitly trade for low latency

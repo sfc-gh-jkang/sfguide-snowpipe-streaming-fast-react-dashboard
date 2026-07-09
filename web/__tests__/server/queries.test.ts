@@ -53,9 +53,24 @@ describe("queries.ts — interactive RAW_EVENTS source", () => {
     }
   });
 
-  it("every query reads from RAW_EVENTS", () => {
+  it("every query reads from an interactive table (RAW_EVENTS or POSITION_BOOK)", () => {
     for (const [name, sql] of ALL_QUERIES) {
-      expect(`${name}:${sql}`).toContain(`${SCHEMA}.RAW_EVENTS`);
+      const readsIT =
+        sql.includes(`${SCHEMA}.RAW_EVENTS`) || sql.includes(`${SCHEMA}.POSITION_BOOK`);
+      expect(`${name}:${readsIT}`).toBe(`${name}:true`);
+    }
+  });
+
+  it("default book tiles serve from the POSITION_BOOK pre-agg write-through (the Redis-GET path), not a query-time RAW_EVENTS rollup", () => {
+    const preaggDefault: Array<[string, string]> = [
+      ["pnl_today", queries.pnl_today()],
+      ["sector_exposure", queries.sector_exposure()],
+      ["top_marks", queries.top_marks(10)],
+      ["watchlist", queries.watchlist()],
+    ];
+    for (const [name, sql] of preaggDefault) {
+      expect(`${name}:${sql}`).toContain(`${SCHEMA}.POSITION_BOOK`);
+      expect(`${name}:${sql}`).not.toContain(`${SCHEMA}.RAW_EVENTS`);
     }
   });
 
@@ -151,5 +166,66 @@ describe("queries.ts — time-travel variants", () => {
     expect(queries.tape_query_at(null)).not.toContain("AT(OFFSET");
     expect(queries.pnl_today_at(0)).not.toContain("AT(OFFSET");
     expect(queries.sector_exposure_at(null)).not.toContain("AT(OFFSET");
+  });
+});
+
+describe("queries.ts — three serving strategies", () => {
+  const SUMMARY_ALIASES = ["AS TOTAL_PNL", "AS POSITION_COUNT", "AS GAINERS", "AS LOSERS"];
+
+  it("all three variants emit the identical summary shape (cross-checkable)", () => {
+    for (const sql of [
+      queries.book_summary_windowed(),
+      queries.book_summary_optimized(),
+      queries.book_summary_preagg(),
+    ]) {
+      const n = normalize(sql);
+      for (const alias of SUMMARY_ALIASES) expect(n).toContain(alias);
+    }
+  });
+
+  it("strategy 1 (windowed) aggregates RAW_EVENTS via window functions", () => {
+    const n = normalize(queries.book_summary_windowed());
+    expect(n).toContain(`${SCHEMA}.RAW_EVENTS`);
+    expect(n).toContain("ROW_NUMBER() OVER (PARTITION BY POSITION_ID");
+    expect(n).not.toContain("POSITION_BOOK");
+  });
+
+  it("strategy 3 (optimized) uses a single GROUP BY + MAX_BY on RAW_EVENTS (no window, no join)", () => {
+    const n = normalize(queries.book_summary_optimized());
+    expect(n).toContain(`${SCHEMA}.RAW_EVENTS`);
+    expect(n).toContain("MAX_BY(");
+    expect(n).toContain("GROUP BY POSITION_ID");
+    expect(n).not.toContain("ROW_NUMBER() OVER");
+    expect(n).not.toContain("POSITION_BOOK");
+  });
+
+  it("strategy 2 (preagg) reads the POSITION_BOOK write-through table, not RAW_EVENTS", () => {
+    const n = normalize(queries.book_summary_preagg());
+    expect(n).toContain(`${SCHEMA}.POSITION_BOOK`);
+    expect(n).toContain("ROW_NUMBER() OVER (PARTITION BY POSITION_ID ORDER BY BOOK_TS DESC)");
+    expect(n).not.toContain("RAW_EVENTS");
+  });
+
+  it("freshness-lag queries target the right source + timestamp column", () => {
+    const raw = normalize(queries.raw_events_lag());
+    expect(raw).toContain(`${SCHEMA}.RAW_EVENTS`);
+    expect(raw).toContain("MAX(EVENT_TS)");
+    expect(raw).toContain("AS LAG_SECONDS");
+    const book = normalize(queries.position_book_lag());
+    expect(book).toContain(`${SCHEMA}.POSITION_BOOK`);
+    expect(book).toContain("MAX(BOOK_TS)");
+    expect(book).toContain("AS LAG_SECONDS");
+  });
+
+  it("no serving-strategy query references the retired PORTFOLIO_LIVE", () => {
+    for (const sql of [
+      queries.book_summary_windowed(),
+      queries.book_summary_optimized(),
+      queries.book_summary_preagg(),
+      queries.raw_events_lag(),
+      queries.position_book_lag(),
+    ]) {
+      expect(sql).not.toMatch(/PORTFOLIO_LIVE/);
+    }
   });
 });

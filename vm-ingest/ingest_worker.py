@@ -12,6 +12,7 @@ import os
 import random
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -26,6 +27,7 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource
 
 from streaming_service import StreamingService
+import book
 
 # ---------------------------------------------------------------------------
 # Config from env
@@ -36,6 +38,10 @@ SF_ROLE = os.environ.get("SNOWFLAKE_ROLE", "CREDIT_INGEST_RL")
 SF_DB = os.environ.get("SNOWFLAKE_DATABASE", "SNOWFLAKE_EXAMPLE")
 SF_SCHEMA = os.environ.get("SNOWFLAKE_SCHEMA", "CREDIT_DEMO")
 SF_TABLE = os.environ.get("SNOWFLAKE_TABLE", "RAW_EVENTS")
+# Strategy-2 pre-agg write-through target (second interactive table). The producer
+# maintains a running per-position book and streams the pre-computed book line here
+# in parallel with the raw event — see BOOK / _book_row / write-through in ingest().
+SF_BOOK_TABLE = os.environ.get("SNOWFLAKE_BOOK_TABLE", "POSITION_BOOK")
 SF_KEY_PATH = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH", "/etc/credit/keys/credit_ingest.p8")
 API_KEY = os.environ.get("INGEST_API_KEY", "")
 PARTITION_COUNT = int(os.environ.get("PARTITION_COUNT", "4"))
@@ -58,6 +64,69 @@ POSITION_ATTR_COLS = (
     "FUND", "WATCHLIST", "BASELINE_MARK", "CURRENT_RATING",
 )
 POSITIONS: dict[str, dict[str, Any]] = {}
+
+# ---------------------------------------------------------------------------
+# Running per-position book (strategy-2 write-through cache)
+# ---------------------------------------------------------------------------
+# The pre-computed book line for each position lives in book.BOOK. On every
+# event we mutate it (book.update_book_state) and stream the resulting
+# fully-combined row (book.book_row_for) into POSITION_BOOK. Reads of that
+# interactive table are then a cheap latest-per-position scan of pre-aggregated
+# rows — the "replaces Redis" hot cache, kept fresh at write time (no refresh lag).
+# The pure book logic lives in book.py so it can be unit-tested without the
+# FastAPI / OTel / Ingest-SDK stack.
+
+# Two blocking wait_for_flush calls per event (raw + book) run concurrently here
+# so per-click latency is ~max(raw, book), not the sum.
+_WRITE_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hpa-write")
+
+
+def _hydrate_book_from_raw_events() -> set[str]:
+    """Rebuild the running book from RAW_EVENTS' current latest-per-position state.
+
+    Run at startup so a producer restart does NOT reset the day's P&L to flat: the
+    book is seeded from baselines (book.init_book) and then hydrated here with the
+    latest MARK / latest CREDIT_EVENT already committed today. Returns the set of
+    POSITION_IDs that have ANY event in the last 24h — the caller seeds baseline
+    MARKs into RAW_EVENTS ONLY for the positions NOT in this set, so live marks are
+    never clobbered. On failure, returns an empty set (caller falls back to seeding
+    every position, i.e. the old behavior).
+    """
+    recent: set[str] = set()
+    try:
+        import snowflake.connector
+
+        conn = snowflake.connector.connect(
+            account=SF_ACCOUNT, user=SF_USER, private_key_file=SF_KEY_PATH,
+            role=SF_ROLE, database=SF_DB, schema=SF_SCHEMA,
+        )
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT POSITION_ID,
+                    MAX_BY(CASE WHEN EVENT_TYPE = 'MARK' THEN NEW_MARK END,
+                           CASE WHEN EVENT_TYPE = 'MARK' THEN EVENT_TS END)         AS LATEST_MARK,
+                    MAX_BY(CASE WHEN EVENT_TYPE = 'CREDIT_EVENT' THEN TO_RATING END,
+                           CASE WHEN EVENT_TYPE = 'CREDIT_EVENT' THEN EVENT_TS END) AS LATEST_RATING
+                FROM {SF_DB}.{SF_SCHEMA}.{SF_TABLE}
+                WHERE EVENT_TS >= DATEADD('hour', -24, SYSDATE())
+                GROUP BY POSITION_ID
+                """
+            )
+            for pos, latest_mark, latest_rating in cur.fetchall():
+                recent.add(pos)
+                book.apply_hydrated(
+                    pos,
+                    float(latest_mark) if latest_mark is not None else None,
+                    latest_rating,
+                )
+        finally:
+            conn.close()
+        log.info("Hydrated running book from RAW_EVENTS: %d positions with recent events", len(recent))
+    except Exception:
+        log.exception("Failed to hydrate book from RAW_EVENTS — will seed all positions (flat)")
+    return recent
 
 
 def load_positions() -> int:
@@ -122,8 +191,19 @@ resource = Resource.create({
     "deployment.environment.name": "gcp-vm",
 })
 provider = TracerProvider(resource=resource)
-otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
-provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{otlp_endpoint}/v1/traces")))
+# Only wire the OTLP exporter when an endpoint is EXPLICITLY configured. The old
+# default (http://localhost:4318) shipped every span to a dead endpoint on the
+# VM (no collector runs there), so BatchSpanProcessor silently dropped them —
+# telemetry theater. Set OTEL_EXPORTER_OTLP_ENDPOINT to a real collector to
+# enable export; otherwise spans stay in-process (no false "we have tracing").
+otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+if otlp_endpoint:
+    provider.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{otlp_endpoint}/v1/traces"))
+    )
+    log.info("OTel spans exporting to %s/v1/traces", otlp_endpoint)
+else:
+    log.info("OTel export disabled (set OTEL_EXPORTER_OTLP_ENDPOINT to enable)")
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer("credit-ingest")
 
@@ -142,6 +222,60 @@ service = StreamingService(
     instance_id="credit-vm",
 )
 
+# Second service → POSITION_BOOK (strategy-2 pre-agg write-through). Its own client
+# + channels (auto-pipe POSITION_BOOK-STREAMING), so raw and book writes go over
+# independent HPA channels and can be flushed in parallel.
+book_service = StreamingService(
+    account=SF_ACCOUNT,
+    user=SF_USER,
+    private_key_path=SF_KEY_PATH,
+    database=SF_DB,
+    schema=SF_SCHEMA,
+    table=SF_BOOK_TABLE,
+    role=SF_ROLE,
+    partition_count=PARTITION_COUNT,
+    instance_id="credit-book",
+)
+
+
+def _write_through(raw_row: dict, partition_key: str) -> dict:
+    """Stream the raw event AND the recomputed book line in parallel.
+
+    Updates the in-memory running book from the raw event, then streams
+    raw→RAW_EVENTS and book→POSITION_BOOK concurrently (two blocking
+    wait_for_flush calls run in the write pool), so per-click latency is
+    ~max(raw, book) rather than the sum. Returns the raw stream result with the
+    book flush time added as `book_flush_committed_ms`. The book write is
+    best-effort: a failure there is logged but never fails the request (the raw
+    event — the system of record — still committed).
+    """
+    book.update_book_state(raw_row)
+    book_row = book.book_row_for(partition_key, raw_row.get("EVENT_TYPE"), raw_row["EVENT_TS"])
+
+    raw_fut = _WRITE_POOL.submit(
+        service.stream_row, raw_row, partition_key=partition_key, offset_token=raw_row["EVENT_ID"]
+    )
+    book_fut = None
+    if book_row is not None and book_service.channels:
+        book_fut = _WRITE_POOL.submit(
+            book_service.stream_row,
+            book_row,
+            partition_key=partition_key,
+            offset_token=raw_row["EVENT_ID"],
+        )
+
+    result = raw_fut.result()  # raises on raw failure (system of record)
+    if book_fut is not None:
+        try:
+            book_res = book_fut.result()
+            result["book_flush_committed_ms"] = book_res.get("flush_committed_ms", 0)
+        except Exception:
+            log.warning("POSITION_BOOK write-through failed (non-fatal)", exc_info=True)
+            result["book_flush_committed_ms"] = None
+    else:
+        result["book_flush_committed_ms"] = None
+    return result
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -152,47 +286,68 @@ async def lifespan(app: FastAPI):
     )
     try:
         service.initialize()
-        log.info("StreamingService ready")
+        book_service.initialize()
+        log.info("StreamingService ready (RAW_EVENTS + POSITION_BOOK channels open)")
 
         # Load the dimension so streamed events can carry denormalized attributes.
         load_positions()
+        # Seed the in-memory running book from baselines, then HYDRATE it from the
+        # marks/ratings already committed in RAW_EVENTS today. This is the restart
+        # fix: without hydration, a producer restart would reset every position to
+        # flat P&L. `recent` = positions that already have an event in the last 24h.
+        book.init_book(POSITIONS)
+        recent = _hydrate_book_from_raw_events()
 
-        # Seed one baseline MARK per position so the RAW_EVENTS interactive table
-        # always reflects the full 62-position book — the dashboard tiles read
-        # RAW_EVENTS directly (no POSITIONS_DIM join), so a position with zero
-        # events would otherwise be invisible until it first trades. Baseline
-        # marks use NEW_MARK = BASELINE_MARK (flat P&L) and SOURCE_APP='seed' so
-        # the live tape filters them out. This also pre-warms the channels, so
-        # the separate warmup loop is no longer needed.
-        seeded = 0
+        # Ensure the full 62-position book is visible in BOTH interactive tables:
+        #   • POSITION_BOOK — stream the (hydrated) book row for EVERY position, so
+        #     strategy 2 reflects the real current state immediately after restart.
+        #   • RAW_EVENTS — only seed a baseline MARK for positions with NO recent
+        #     event (`pos not in recent`); seeding a position that already has live
+        #     marks would clobber them (the seed's EVENT_TS=now becomes the latest).
+        # Baseline seeds use SOURCE_APP='seed' so the live tape filters them out.
+        seeded_raw = 0
+        booked = 0
         seed_positions = POSITION_IDS or ["POS-0001"]
         for pos in seed_positions:
-            attrs = POSITIONS.get(pos, {})
-            baseline = attrs.get("BASELINE_MARK")
             now = datetime.now(timezone.utc)
-            seed_row = {
-                "EVENT_ID": str(uuid.uuid4()),
-                "EVENT_TS": now.strftime("%Y-%m-%d %H:%M:%S.%f"),
-                "EVENT_TYPE": "MARK",
-                "POSITION_ID": pos,
-                "PREV_MARK": baseline,
-                "NEW_MARK": baseline,
-                "MARK_SOURCE": "SEED",
-                "SOURCE_APP": "seed",
-                "INGESTED_TS": now.strftime("%Y-%m-%d %H:%M:%S.%f"),
-            }
-            _stamp_position_attrs(seed_row)
+            ts = now.strftime("%Y-%m-%d %H:%M:%S.%f")
             try:
-                service.stream_row(seed_row, partition_key=pos, offset_token=seed_row["EVENT_ID"])
-                seeded += 1
+                # Always publish the current book row to POSITION_BOOK.
+                if book_service.channels:
+                    brow = book.book_row_for(pos, "SEED", ts)
+                    if brow is not None:
+                        book_service.stream_row(brow, partition_key=pos, offset_token=str(uuid.uuid4()))
+                        booked += 1
+                # Only seed RAW_EVENTS for positions with no live event (avoid clobber).
+                if pos not in recent:
+                    attrs = POSITIONS.get(pos, {})
+                    baseline = attrs.get("BASELINE_MARK")
+                    seed_row = {
+                        "EVENT_ID": str(uuid.uuid4()),
+                        "EVENT_TS": ts,
+                        "EVENT_TYPE": "MARK",
+                        "POSITION_ID": pos,
+                        "PREV_MARK": baseline,
+                        "NEW_MARK": baseline,
+                        "MARK_SOURCE": "SEED",
+                        "SOURCE_APP": "seed",
+                        "INGESTED_TS": ts,
+                    }
+                    _stamp_position_attrs(seed_row)
+                    service.stream_row(seed_row, partition_key=pos, offset_token=seed_row["EVENT_ID"])
+                    seeded_raw += 1
             except Exception:
-                log.warning("Baseline seed for %s failed (non-fatal)", pos, exc_info=True)
-        log.info("Seeded %d/%d baseline position marks", seeded, len(seed_positions))
+                log.warning("Startup seed for %s failed (non-fatal)", pos, exc_info=True)
+        log.info(
+            "Startup seed complete: %d RAW_EVENTS baselines (missing positions), %d POSITION_BOOK rows, %d positions already live",
+            seeded_raw, booked, len(recent),
+        )
     except Exception:
         log.exception("Failed to initialize StreamingService")
     yield
     log.info("Shutting down StreamingService")
     service.shutdown()
+    book_service.shutdown()
 
 
 app = FastAPI(title="ACME Ingest", lifespan=lifespan)
@@ -204,6 +359,10 @@ app = FastAPI(title="ACME Ingest", lifespan=lifespan)
 class IngestRequest(BaseModel):
     event_type: str = Field(..., pattern="^(TRADE|MARK|CREDIT_EVENT)$")
     position_id: str | None = None
+    # Optional caller-provided EVENT_ID. When present it becomes the row's
+    # EVENT_ID so the client that fired the event can correlate its optimistic
+    # bar with the async visibility backfill. Falls back to a fresh uuid.
+    event_id: str | None = None
     side: str | None = None
     qty: float | None = None
     price: float | None = None
@@ -221,7 +380,7 @@ def _fill_defaults(req: IngestRequest) -> dict:
     """Generate realistic random fields for any omitted optional values."""
     pos = req.position_id or random.choice(POSITION_IDS)
     now = datetime.now(timezone.utc)
-    event_id = str(uuid.uuid4())
+    event_id = req.event_id or str(uuid.uuid4())
 
     row: dict[str, Any] = {
         "EVENT_ID": event_id,
@@ -278,9 +437,14 @@ def _stamp_position_attrs(row: dict) -> None:
 @app.get("/health")
 async def health():
     status = service.get_status()
+    book_status = book_service.get_status()
+    # Healthy only if BOTH the raw and the POSITION_BOOK write-through channels are up.
+    both_up = status["channel_count"] > 0 and book_status["channel_count"] > 0
     return {
-        "status": "ok" if status["channel_count"] > 0 else "degraded",
+        "status": "ok" if both_up else "degraded",
         **status,
+        "book_channel_count": book_status["channel_count"],
+        "book_target": book_status["target"],
     }
 
 
@@ -305,7 +469,7 @@ async def ingest(req: IngestRequest, request: Request, x_api_key: str | None = H
         span.set_attribute("partition.index", service._hash_to_partition(partition_key))
 
         try:
-            result = service.stream_row(row, partition_key=partition_key, offset_token=row["EVENT_ID"])
+            result = _write_through(row, partition_key=partition_key)
         except Exception as exc:
             span.set_attribute("error", True)
             span.set_attribute("error.message", str(exc))
@@ -322,9 +486,13 @@ async def ingest(req: IngestRequest, request: Request, x_api_key: str | None = H
             "partition": result["partition"],
             "position_id": partition_key,
             "event_type": row["EVENT_TYPE"],
+            # EVENT_TS (== BOOK_TS written to POSITION_BOOK) lets the server probe
+            # POSITION_BOOK visibility (BOOK_TS >= this) since it has no EVENT_ID.
+            "event_ts": row["EVENT_TS"],
             "vm_received_ms": vm_received_ms,
             "sdk_appended_ms": result["sdk_appended_ms"],
             "flush_committed_ms": result["flush_committed_ms"],
+            "book_flush_committed_ms": result.get("book_flush_committed_ms"),
             "total_handler_ms": total_handler_ms,
         }
 
@@ -362,6 +530,18 @@ async def ingest_batch(request: Request, x_api_key: str | None = Header(None)):
                 ingested += service.stream_batch(
                     pos_rows, partition_key=pos_id, offset_token=last_id
                 )
+                # Keep POSITION_BOOK consistent: apply every row in order to the
+                # running book, then stream ONE final book row per position (the
+                # post-burst state). Best-effort — never fails the batch.
+                if book_service.channels:
+                    for r in pos_rows:
+                        book.update_book_state(r)
+                    book_row = book.book_row_for(pos_id, pos_rows[-1]["EVENT_TYPE"], pos_rows[-1]["EVENT_TS"])
+                    if book_row is not None:
+                        try:
+                            book_service.stream_batch([book_row], partition_key=pos_id, offset_token=last_id)
+                        except Exception:
+                            log.warning("POSITION_BOOK batch write-through failed for %s (non-fatal)", pos_id, exc_info=True)
             except Exception as exc:
                 span.set_attribute("error", True)
                 log.exception("stream_batch failed for position %s", pos_id)

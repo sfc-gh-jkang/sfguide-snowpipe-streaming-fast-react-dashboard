@@ -7,20 +7,20 @@
 
 ## 60-second narrative (open with this)
 
-> "Every piece of the streaming pipeline here is sub-second — Snowpipe Streaming commits in 30 milliseconds, the row is queryable in 150ms, Interactive Warehouse returns it in 250ms. Traditional dashboards add ~1.6 seconds of latency on every interaction — up to 3.4s at p95 — because they re-render the entire page.
+> "Every read here is sub-second — Snowpipe Streaming commits in ~0.3 seconds, and once a streamed row is queryable the Interactive Warehouse returns it in ~130ms. One honest caveat: a just-committed streamed row takes ~1.3 seconds (p50; varies ~0.7–2.4 s) to become queryable on the interactive warehouse — that's the streaming-visibility lag, and any consumer (including Streamlit) pays it. On top of that, traditional dashboards add ~1.6 seconds of rerun latency on every interaction — up to 3.4s at p95 — because they re-render the entire page.
 >
-> What you're about to see is a React dashboard running on Snowpark Container Services with a WebSocket push model. After a click, the just-fired row appears optimistically in about 0.4 seconds — and React's render step itself is only ~10 milliseconds — because it diffs one component instead of re-running the whole script. Same data path — HPA SDK, Interactive Tables, Cortex Agent. Let me show you."
+> What you're about to see is a React dashboard running on Snowpark Container Services with a WebSocket push model. After a click, the just-fired row **paints optimistically in ~10 milliseconds** — React prepends it instantly instead of blocking on a full-script rerun — while the honest **click → interactive-table-confirmed** time is ~1.5–2 seconds (p50), dominated by that ~1.3 s visibility lag (which varies ~0.7–2.4 s). Same data path — HPA SDK, Interactive Tables, Cortex Agent. Let me show you."
 
 ## What changed (and what didn't)
 
 | Layer | Traditional approach | This demo (React on SPCS) | Notes |
 |---|---|---|---|
 | Producer VM + HPA SDK | FastAPI + 4-ch pool | FastAPI + 4-ch pool | Unchanged |
-| Snowpipe Streaming commit | ~30ms | ~30ms | Unchanged |
+| Snowpipe Streaming commit | ~0.3s | ~0.3s | Unchanged (dual-table max) |
 | Interactive Table | RAW_EVENTS (streaming target + serving) | RAW_EVENTS (streaming target + serving) | Unchanged |
 | Interactive Warehouse | CREDIT_DEMO_INT_WH | CREDIT_DEMO_INT_WH | Unchanged |
 | Cortex Agent | CREDIT_AGENT | CREDIT_AGENT | Unchanged |
-| **UI framework** | **Full-page rerun (~1.6s p50, 3.4s p95)** | **Next.js + WebSocket (optimistic row ~0.4s, render step ~10ms)** | **~4× faster to see the row** |
+| **UI framework** | **Full-page rerun (~1.6s p50, 3.4s p95)** | **Next.js + WebSocket (optimistic paint ~10ms; click→IT-confirmed ~1.5–2s p50)** | **Feels instant vs a blocking rerun; both pay the same ~1.3s p50 IT visibility (varies ~0.7–2.4s)** |
 
 ## Demo script (8 minutes)
 
@@ -32,14 +32,16 @@
 ### Beat 2 — "The click" (1:00-2:30)
 
 - Click **Trade**.
-- Point at the latency timeline: "The grey flash you saw was the optimistic ack — the app prepended the row as soon as the commit acked (~0.4s), before the next full poll. The green flash later is the verified ack — HPA actually committed. React updated just that one tile, not the whole page."
-- Click 5 more times rapidly. All bars stack. Each render/diff is a few milliseconds; the rows appear optimistically in well under half a second.
+- Point at the latency timeline: "The grey flash you saw was the optimistic paint — React prepended the row **instantly on click (~10ms)**, before the network even round-trips. The green flash later is when the interactive table confirms the row is actually queryable — that's ~1.5–2s end-to-end (p50), dominated by the ~1.3s streaming-visibility lag (varies ~0.7–2.4s). React updated just that one tile, not the whole page."
+- Click 5 more times rapidly. All bars stack. Each render/diff is a few milliseconds; the rows paint optimistically in ~10ms (they confirm against the interactive table a couple seconds later).
+- Flip **Live market** ON: "Now the desk runs itself — a stream of marks and trades, so you can watch the tape, P&L, and tiles move live without clicking. Every one of these events goes through the exact same HPA write-through."
 
-### Beat 3 — "Why it's fast" (2:30-4:00)
+### Beat 3 — "Three ways to serve the book, all fresh" (2:30-4:00)
 
-- Point at the tape: "Traditional dashboards poll the database every few seconds and redraw the entire page — ~1.6 seconds of dead air after every click (up to 3.4s at p95). Here, the WebSocket pushes only the changed rows at 200ms cadence. React diffs one component, not the full DOM."
-- Fire **Trade** again. Point at the timeline bar. "That bar breaks down the round trip — network, SDK append, HPA flush. The optimistic row appears in about 0.4 seconds, before the next full poll — the ack fires as soon as Snowflake confirms the commit. When the Interactive Table makes it queryable (~2400ms), the row goes solid green. React's own render step is ~10ms — zero wasted re-renders."
-- "Same HPA commit. Same Interactive Table. Same row. The difference is purely the rendering model."
+- Point at the **Serving strategy comparison** panel (now moving because Live market is on): "We serve the same position-book P&L rollup three ways on the Interactive Warehouse — a query-time window rollup, a pre-aggregated write-through cache, and an optimized MAX_BY rollup. The bars are live read latency; the pre-agg is fastest."
+- "The 'totals match' check proves all three return identical numbers — same data, three serving paths. And the freshness row shows event→queryable ~1.3s p50 (the streaming-visibility lag, varies ~0.7–2.4s) and event→visualized — all three equally fresh, because none uses a TARGET_LAG refresh. That's the 'Interactive Tables replace Redis' story done without the staleness."
+- Open the panel's **How this works** pop-down if asked: it defines latency vs. lag vs. freshness with the Snowflake docs.
+- "Same HPA commit. Same Interactive Table. The difference between the strategies is purely how you serve the read."
 
 ### Beat 4 — "What this means for your desk" (4:00-5:00)
 
@@ -57,7 +59,7 @@
 
 - Fire one more trade in the React UI.
 - Switch to Ask the Book: "What was our most recent trade?"
-- Agent finds it. "That row was committed 150ms after you clicked, queryable in 250ms, shown optimistically on the tile in ~0.4s, and the Agent found it in the book within 10 seconds. Five layers — ingest, storage, serving, AI, UI — all Snowflake, one account."
+- Agent finds it. "That row painted optimistically on the tile in ~10ms, committed in ~0.3s, became queryable in the interactive table ~1.3s later (p50; varies ~0.7–2.4s), and the Agent found it in the book within 10 seconds. Five layers — ingest, storage, serving, AI, UI — all Snowflake, one account."
 
 ### Beat 7 — "The closer" (7:30-8:00)
 
@@ -65,10 +67,10 @@
 
 ## What the customer should walk away believing
 
-1. **The streaming pipeline was never slow** — Snowflake commits in 30ms, queries in 250ms. The ~1.6s (up to 3.4s p95) was the UI framework, not the platform.
+1. **The serving layer is fast** — Snowflake commits in ~0.3s and serves reads in ~130ms. The honest caveat: a just-streamed row takes ~1.3s p50 to become queryable (streaming-visibility lag, varies ~0.7–2.4s) — a platform characteristic any consumer pays. On top of that, the ~1.6s (up to 3.4s p95) rerun cost was the UI framework, and the optimistic paint (~10ms) hides both from the user.
 2. **SPCS is production-ready for internal dashboards** — OAuth gated, no separate auth, scales with compute pool sizing.
 3. **WebSocket push eliminates polling waste** — 200ms cadence, diff-only broadcasts, React.memo prevents off-slice re-renders.
-4. **The speed is undeniable** — same data, same path, the row appears optimistically in ~0.4s and the render step is ~10ms. Record the screen.
+4. **The perceived speed is undeniable** — same data, same path, the row paints optimistically in ~10ms (vs Streamlit blocking on a ~1.6s rerun). Record the screen.
 5. **Cortex Agent works with any frontend** — SSE streaming gives token-by-token UX regardless of the calling framework.
 
 ## Anticipated questions

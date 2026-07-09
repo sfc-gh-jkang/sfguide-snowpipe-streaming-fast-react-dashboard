@@ -9,9 +9,19 @@ function Nav() {
   const pathname = usePathname();
   const isDesk = pathname === "/";
   const isAsk = pathname === "/ask";
+  const isDemo = pathname === "/demo";
+  const isLatency = pathname === "/latency";
 
   return (
     <nav className="flex gap-6 px-6 pt-3 border-b border-slate-700">
+      <Link
+        href="/demo"
+        className={`pb-2 text-sm transition-colors ${
+          isDemo ? "tab-active" : "tab-inactive hover:text-slate-300"
+        }`}
+      >
+        Demo
+      </Link>
       <Link
         href="/"
         className={`pb-2 text-sm transition-colors ${
@@ -27,6 +37,14 @@ function Nav() {
         }`}
       >
         Ask the Book
+      </Link>
+      <Link
+        href="/latency"
+        className={`pb-2 text-sm transition-colors ${
+          isLatency ? "tab-active" : "tab-inactive hover:text-slate-300"
+        }`}
+      >
+        How fresh &amp; fast?
       </Link>
     </nav>
   );

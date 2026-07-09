@@ -55,12 +55,19 @@ interface DashboardStore {
   setObservability: (obs: ObservabilityState) => void;
   addLatencyBar: (bar: LatencyBar) => void;
   updateLatencyBar: (label: string, updates: Partial<LatencyBar>) => void;
+  /** Merge partial updates into the bar matching eventId (no-op if absent). */
+  updateLatencyBarByEventId: (eventId: string, updates: Partial<LatencyBar>) => void;
   /**
    * Update a latency bar's it_poll_ms by event_id (for the async it_visible
    * WS message that arrives after /api/ingest returns). Falls back to a no-op
-   * if no bar with that event_id is found.
+   * if no bar with that event_id is found. `table` routes to raw vs book fields.
    */
-  updateLatencyBarItPoll: (eventId: string, itPollMs: number) => void;
+  updateLatencyBarItPoll: (
+    eventId: string,
+    itPollMs: number,
+    confirmed: boolean,
+    table: "raw" | "book",
+  ) => void;
   setBurstResult: (result: BurstResult | null) => void;
   setWarehouseMode: (mode: "interactive" | "standard") => void;
   setDayMetrics: (metrics: DayMetrics | null) => void;
@@ -80,6 +87,18 @@ interface DashboardStore {
    */
   scanDetectTimings: number[];
   addScanDetectTiming: (ms: number) => void;
+
+  /**
+   * Honest "click → Interactive-Table-confirmed on screen" latency, published by
+   * the InteractiveLatency widget so any component (e.g. the /demo Fast card) can
+   * show the SAME measured number instead of inventing one. p50/best over the
+   * widget's rolling sample window; last = the most recent single fire. All in ms,
+   * null until the first successful fire.
+   */
+  itServedP50Ms: number | null;
+  itServedBestMs: number | null;
+  itServedLastMs: number | null;
+  setItServed: (p50: number | null, best: number | null, last: number | null) => void;
 
   /** Live WebSocket connection state — surfaced in the diagnostic strip. */
   wsState: "connecting" | "open" | "closed" | "error";
@@ -136,6 +155,9 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
   fullPageRenderTimings: [],
   wsDeliveryTimings: [],
   scanDetectTimings: [],
+  itServedP50Ms: null,
+  itServedBestMs: null,
+  itServedLastMs: null,
   wsState: "connecting",
   wsMessageCount: 0,
 
@@ -193,9 +215,26 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
   setObservability: (obs) => set({ observability: obs }),
 
   addLatencyBar: (bar) =>
-    set((state) => ({
-      latencyBars: [...state.latencyBars, bar].slice(-MAX_LATENCY_BARS),
-    })),
+    set((state) => {
+      // Dedup by event_id: an event fired by this browser produces both a
+      // client-measured bar (accurate network+render) and a WS-optimistic echo.
+      // A "client" bar always wins over a "ws" bar; same-source dups are ignored.
+      if (bar.event_id) {
+        const idx = state.latencyBars.findIndex((b) => b.event_id === bar.event_id);
+        if (idx !== -1) {
+          const existing = state.latencyBars[idx];
+          if (bar.source === "client" && existing.source !== "client") {
+            const next = state.latencyBars.slice();
+            next[idx] = bar; // client replaces the ws placeholder
+            return { latencyBars: next };
+          }
+          return state; // ignore duplicate
+        }
+      }
+      return {
+        latencyBars: [...state.latencyBars, bar].slice(-MAX_LATENCY_BARS),
+      };
+    }),
 
   updateLatencyBar: (label, updates) =>
     set((state) => ({
@@ -204,10 +243,21 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
       ),
     })),
 
-  updateLatencyBarItPoll: (eventId, itPollMs) =>
+  updateLatencyBarByEventId: (eventId, updates) =>
     set((state) => ({
       latencyBars: state.latencyBars.map((b) =>
-        b.event_id === eventId ? { ...b, it_poll_ms: itPollMs } : b
+        b.event_id === eventId ? { ...b, ...updates } : b
+      ),
+    })),
+
+  updateLatencyBarItPoll: (eventId, itPollMs, confirmed, table) =>
+    set((state) => ({
+      latencyBars: state.latencyBars.map((b) =>
+        b.event_id === eventId
+          ? table === "book"
+            ? { ...b, book_poll_ms: itPollMs, book_poll_confirmed: confirmed }
+            : { ...b, it_poll_ms: itPollMs, it_poll_confirmed: confirmed }
+          : b
       ),
     })),
 
@@ -256,6 +306,9 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
       const next = [...state.scanDetectTimings, ms].slice(-50);
       return { scanDetectTimings: next };
     }),
+
+  setItServed: (p50, best, last) =>
+    set({ itServedP50Ms: p50, itServedBestMs: best, itServedLastMs: last }),
 
   setWsState: (s) => set({ wsState: s }),
   incrementWsMessageCount: () =>

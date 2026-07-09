@@ -62,9 +62,23 @@ export function EventGenerator() {
       const t1_post_done = performance.now();
       const browser_post_total = t1_post_done - t0_click;
       // IT-poll is no longer in the response (architectural fix, item #12).
-      // Click pipeline is now strictly: network + SDK + flush — apples-to-apples
-      // with Streamlit's parent fork.
+      // Click pipeline is now strictly: network + SDK + flush (+ VM overhead) —
+      // apples-to-apples with Streamlit's parent fork.
       const networkMs = Math.max(0, browser_post_total - data.total_handler_ms);
+      // Flush = MAX(raw, book): RAW_EVENTS and POSITION_BOOK write-throughs run
+      // concurrently on the VM; both must commit, so the wall-clock is the long
+      // pole, not the sum.
+      const flushMs = Math.max(
+        data.flush_committed_ms,
+        data.book_flush_committed_ms ?? 0
+      );
+      // VM handler time not attributed to append/flush (request parse, in-memory
+      // book recompute, book-concurrency excess, response build). Makes
+      // network + sdk + flush + vm_overhead == the real round-trip.
+      const vmOverheadMs = Math.max(
+        0,
+        data.total_handler_ms - data.sdk_appended_ms - flushMs
+      );
 
       // No optimistic prepend — the next /api/snapshot poll (≤1.5s) brings the
       // verified row from RAW_EVENTS with full issuer/sector/age. Single source
@@ -89,9 +103,12 @@ export function EventGenerator() {
         event_id: data.event_id, // Lets WS `it_visible` find this bar later.
         network_ms: networkMs,
         sdk_appended_ms: data.sdk_appended_ms,
-        flush_committed_ms: data.flush_committed_ms,
+        flush_committed_ms: flushMs,
+        vm_overhead_ms: vmOverheadMs,
         it_poll_ms: 0, // Updated post-hoc via WS.
         render_ms: 0,
+        partition: data.partition,
+        source: "client",
       });
       setLastEventId(data.event_id);
 
@@ -127,7 +144,7 @@ export function EventGenerator() {
         <button
           onClick={() => fireEvent("TRADE")}
           disabled={loading !== null}
-          title="Generate a synthetic TRADE event. Picks a random POSITION_ID from POSITIONS_DIM, builds a JSON payload with side/qty/price/notional, POSTs to /api/ingest. The backend appends to RAW_EVENTS via Snowpipe Streaming HPA SDK and broadcasts an optimistic WebSocket message. Round-trip target ~10 ms paint, ~1.5-1.8 s for the row to become visible in the Interactive Table."
+          title="Generate a synthetic TRADE event. Picks a random POSITION_ID from POSITIONS_DIM, builds a JSON payload with side/qty/price/notional, POSTs to /api/ingest. The backend appends to RAW_EVENTS via Snowpipe Streaming HPA SDK and broadcasts an optimistic WebSocket message. Optimistic paint ~10 ms; the row becomes queryable in the Interactive Table typically a few hundred ms to ~1.5 s later (live-measured — see the IT-poll segment in the latency timeline)."
           className="px-3 py-2 text-xs font-semibold rounded bg-snow-blue text-white hover:bg-snow-blue-dark disabled:opacity-50 transition-colors"
         >
           {loading === "TRADE" ? "..." : "Trade"}
@@ -158,8 +175,18 @@ export function EventGenerator() {
             {lastResult.position_id} (P{lastResult.partition})
           </p>
           <p className="text-xs text-slate-500">
+            {lastResult.vm_received_ms != null && (
+              <>recv {lastResult.vm_received_ms.toFixed(2)}ms · </>
+            )}
             SDK {lastResult.sdk_appended_ms.toFixed(2)}ms · Flush{" "}
             {lastResult.flush_committed_ms.toFixed(0)}ms
+            {lastResult.book_flush_committed_ms != null && (
+              <>
+                {" "}(raw) /{" "}
+                {lastResult.book_flush_committed_ms.toFixed(0)}ms (book,
+                concurrent)
+              </>
+            )}
           </p>
           {lastTimings && (
             <p className="text-[10px] text-slate-500 font-mono leading-tight pt-1 border-t border-slate-700/50">

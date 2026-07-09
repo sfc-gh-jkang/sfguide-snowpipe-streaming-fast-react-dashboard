@@ -153,16 +153,16 @@ export function StressTest() {
           <div className="mt-1 p-2 rounded bg-slate-900/60 border border-slate-700 text-[11px] space-y-0.5">
             <p className="text-slate-300">
               <span className="text-green-400 font-semibold">{result.ingested}</span> /
-              {" "}{result.requested} events
+              {" "}{result.requested} events (fired sequentially)
             </p>
             <p className="text-slate-400 font-mono">
-              VM batch: {result.vm_elapsed_ms.toFixed(0)}ms
+              Total wall: {result.vm_elapsed_ms.toFixed(0)}ms (Σ round-trips)
             </p>
             <p className="text-slate-400 font-mono">
-              Avg/event: {result.avg_per_event_ms.toFixed(1)}ms
+              Avg/event: {result.avg_per_event_ms.toFixed(1)}ms round-trip
             </p>
-            <p className="text-slate-500 font-mono">
-              Round-trip: {result.total_handler_ms.toFixed(0)}ms
+            <p className="text-slate-500 text-[10px]">
+              Each event = one client→VM→Snowflake round-trip. See the p50/p95/p99 histogram below.
             </p>
           </div>
         )}

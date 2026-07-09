@@ -3,12 +3,15 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { LatencyTimeline } from "@/components/LatencyTimeline";
 import { LatencyComparison } from "@/components/LatencyComparison";
+import { InteractiveLatency } from "@/components/InteractiveLatency";
+import { ServingStrategyComparison } from "@/components/ServingStrategyComparison";
 import { LatencyStats } from "@/components/LatencyStats";
 import { LiveTape } from "@/components/LiveTape";
 import { KpiTiles } from "@/components/KpiTiles";
 import { SectorDonut } from "@/components/SectorDonut";
 import { TopMarks } from "@/components/TopMarks";
 import { EventGenerator } from "@/components/EventGenerator";
+import { MarketSimulator } from "@/components/MarketSimulator";
 import { HpaStatus } from "@/components/HpaStatus";
 import { StressTest } from "@/components/StressTest";
 import { BurstStats } from "@/components/BurstStats";
@@ -105,7 +108,7 @@ export default function LiveDeskPage() {
   })();
 
   // Live measurements piped into the doc-table prose so we never lie about
-  // hardcoded numbers (~30 ms HPA flush, ~50 ms browser update, ~2.2 s e2e).
+  // hardcoded numbers (~30 ms HPA flush, ~50 ms browser update, ~3 s click→verified).
   // When no samples exist yet, fall back to archetypal hints with explicit
   // "(no clicks yet)" / "(measuring…)" wording.
   const latencyBars = useDashboardStore((s) => s.latencyBars);
@@ -408,7 +411,7 @@ export default function LiveDeskPage() {
           </label>
           <label
             className="flex items-center gap-1 cursor-pointer"
-            title={`Standard Warehouse (${PUBLIC_STANDARD_WH}, XSMALL, AUTO_SUSPEND=30 s) querying Dynamic Tables. Suspends after 30 s idle = cold-start spike on first click after a pause. Used to show the latency cost of letting a warehouse idle-suspend, vs Interactive which stays warm.`}
+            title={`Standard Warehouse (${PUBLIC_STANDARD_WH}, XSMALL, AUTO_SUSPEND=30 s) running the exact same queries against the same RAW_EVENTS/POSITION_BOOK Interactive Tables — just without the interactive warm SSD cache. Suspends after 30 s idle = cold-start spike on first click after a pause. Used to show the latency cost of letting a warehouse idle-suspend, vs Interactive which stays warm.`}
           >
             <input
               type="radio"
@@ -506,8 +509,8 @@ export default function LiveDeskPage() {
             </thead>
             <tbody className="divide-y divide-slate-800">
               <tr><td className="p-2">1</td><td className="p-2"><strong>Snowpipe Streaming HPA</strong> (GA Sept 2025)</td><td className="p-2">Sub-second row-level ingest with <code className="text-snow-blue">wait_for_flush()</code> for <strong className="text-emerald-300">{liveDocStats.flushLabel}</strong> commit acknowledgement (live median, n={liveDocStats.n})</td></tr>
-              <tr><td className="p-2">2</td><td className="p-2"><strong>Interactive Tables</strong></td><td className="p-2"><code>RAW_EVENTS</code> is itself the Interactive Table (<code>CLUSTER BY (EVENT_TS)</code>) — Snowpipe Streaming writes rows straight into it via the channel API, and every tile is served from it (aggregated at query time). Replaces Redis; same table is system of record AND hot serving layer.</td></tr>
-              <tr><td className="p-2">3</td><td className="p-2"><strong>Interactive Warehouses</strong></td><td className="p-2">Dedicated compute SKU bound to Interactive Tables — sub-second concurrent reads</td></tr>
+              <tr><td className="p-2">2</td><td className="p-2"><strong>Interactive Tables</strong></td><td className="p-2">Two ITs, both written directly by Snowpipe Streaming (no landing table): <code>RAW_EVENTS</code> (<code>CLUSTER BY (EVENT_TS)</code>, system of record) and <code>POSITION_BOOK</code> (<code>CLUSTER BY (POSITION_ID)</code>, a pre-aggregated hot cache the producer write-throughs in parallel). Replaces Redis — the writer maintains the hot cache, so serving is fresh with no <code>TARGET_LAG</code> refresh.</td></tr>
+              <tr><td className="p-2">3</td><td className="p-2"><strong>Interactive Warehouses</strong></td><td className="p-2">Dedicated compute SKU bound to Interactive Tables — sub-second concurrent reads. The book is served <strong>3 ways</strong> (query-time window rollup, pre-agg read, MAX_BY group-by), all live + provably identical (see the Serving Strategy panel).</td></tr>
               <tr><td className="p-2">4</td><td className="p-2"><strong>Snowflake Apps Deploy</strong></td><td className="p-2">Next.js + WebSocket on SPCS — Snowsight-gated, OAuth via <code>/snowflake/session/token</code></td></tr>
               <tr><td className="p-2">5</td><td className="p-2"><strong>Cortex Agent</strong> (Analyst + Search)</td><td className="p-2">Natural-language Q&amp;A over the live book — {`"Show me Apollo's exposure"`}</td></tr>
               <tr><td className="p-2">6</td><td className="p-2"><strong>Semantic View</strong></td><td className="p-2">Metadata-rich layer with synonyms + sample values — no model training</td></tr>
@@ -533,16 +536,27 @@ export default function LiveDeskPage() {
       {/* Latency Comparison — React vs Streamlit baseline */}
       <LatencyComparison />
 
+      {/* Serving strategy comparison — 3 fresh ways to serve the book */}
+      <div id="serving" className="scroll-mt-4">
+        <ServingStrategyComparison />
+      </div>
+
       {/* Latency Timeline — full width headline */}
-      <section>
+      <section id="latency" className="scroll-mt-4">
         <h2 className="text-lg font-semibold mb-2">
-          Latency Timeline — Click → Visible in Interactive Table → Painted
+          Latency Timeline — Click → Committed → Painted, then Verified in Interactive Table
         </h2>
         <p className="text-xs text-slate-400 mb-3">
-          Each bar is one click, broken into <strong>5 measured segments</strong>. Snowflake commits
-          via <code className="text-snow-blue">wait_for_flush()</code> in <strong className="text-emerald-300">{liveDocStats.flushLabel}</strong> (live median, n={liveDocStats.n}); the row is
-          queryable from any other connection within a few hundred ms; React renders the diff in &lt;16ms.
+          Each bar is one click, broken into <strong>6 measured segments</strong>. Snowflake commits
+          via <code className="text-snow-blue">wait_for_flush()</code> in <strong className="text-emerald-300">{liveDocStats.flushLabel}</strong> (live median, n={liveDocStats.n});
+          React paints the row <strong>optimistically at flush-ack in &lt;16ms</strong> — the row then becomes
+          queryable in the Interactive Table a few hundred ms later (segment 6, arrives async), so the
+          paint precedes the verify rather than following it.
         </p>
+        {/* Honest end-to-end: click → row read back from the Interactive Table → painted. */}
+        <div className="mb-3">
+          <InteractiveLatency />
+        </div>
         <LatencyTimeline />
         <LatencyStats />
 
@@ -553,8 +567,12 @@ export default function LiveDeskPage() {
           </summary>
           <div className="px-4 py-3 border-t border-slate-700 text-xs text-slate-300">
             <p className="mb-3">
-              The chart breaks <strong>click → row visible in Interactive Table → painted on screen</strong> into
-              five real measurements, not modeled estimates. Each is captured at a known checkpoint.
+              The chart breaks <strong>click → committed → painted (optimistic) → verified-visible in the
+              Interactive Table</strong> into six real measurements, not modeled estimates. Each is captured
+              at a known checkpoint. Note the order: React paints at flush-ack (segment 5), then IT
+              visibility (segment 6) resolves async ~1.3 s later (the streaming-visibility lag —
+              varies ~0.7–2.4 s) — the two overlap. Segments 1+2+3+4+6 sum to click→verified
+              (p50 ~1.5–2 s); segment 5 (paint) is concurrent, not additive.
             </p>
             <table className="w-full text-xs border-collapse">
               <thead>
@@ -580,26 +598,32 @@ export default function LiveDeskPage() {
                 </tr>
                 <tr>
                   <td className="p-2"><span className="inline-block w-2 h-2 rounded-sm" style={{background:"#29B5E8"}}></span> 3</td>
-                  <td className="p-2"><strong>HPA flush commit</strong></td>
-                  <td className="p-2"><code>wait_for_flush(timeout=10)</code> blocks until Snowflake server confirms commit</td>
+                  <td className="p-2"><strong>HPA flush commit</strong> (max raw, book)</td>
+                  <td className="p-2"><code>wait_for_flush(timeout=10)</code> blocks until Snowflake confirms commit. RAW_EVENTS and POSITION_BOOK stream <em>concurrently</em> (ThreadPoolExecutor); shown as <code>max()</code> of the two — the long pole, not the sum</td>
                   <td className="p-2">30-200 ms</td>
                 </tr>
                 <tr>
-                  <td className="p-2"><span className="inline-block w-2 h-2 rounded-sm" style={{background:"#FBBF24"}}></span> 4</td>
-                  <td className="p-2"><strong>IT poll</strong></td>
-                  <td className="p-2">Server-side <code>checkVisibleQuick()</code> in <code>/api/ingest</code> polls IT every 100 ms; on first appearance the WebSocket broker broadcasts <code>it_visible</code> to the browser</td>
-                  <td className="p-2">200-500 ms</td>
+                  <td className="p-2"><span className="inline-block w-2 h-2 rounded-sm" style={{background:"#94A3B8"}}></span> 4</td>
+                  <td className="p-2"><strong>VM overhead</strong></td>
+                  <td className="p-2"><code>total_handler_ms − sdk − flush</code>: request parse, in-memory book recompute, book-concurrency excess, response build. Makes segments 1+2+3+4 sum to the real round-trip</td>
+                  <td className="p-2">1-10 ms</td>
                 </tr>
                 <tr>
                   <td className="p-2"><span className="inline-block w-2 h-2 rounded-sm" style={{background:"#A78BFA"}}></span> 5</td>
-                  <td className="p-2"><strong>React render</strong></td>
-                  <td className="p-2"><code>requestAnimationFrame</code> × 2 after store update — measures real paint cycle</td>
+                  <td className="p-2"><strong>React render</strong> (optimistic paint)</td>
+                  <td className="p-2"><code>requestAnimationFrame</code> × 2 after the optimistic prepend at flush-ack — real paint cycle, fires <em>before</em> the IT confirms</td>
                   <td className="p-2"><strong>{liveDocStats.browserUpdateLabel}</strong></td>
+                </tr>
+                <tr>
+                  <td className="p-2"><span className="inline-block w-2 h-2 rounded-sm" style={{background:"#FBBF24"}}></span> 6</td>
+                  <td className="p-2"><strong>IT poll</strong> (verify · concurrent)</td>
+                  <td className="p-2">Server-side <code>pollVisible()</code> in <code>/api/ingest</code> polls IT every 100 ms (budget ~4 s); on first appearance the WebSocket broker broadcasts <code>it_visible</code> with a <code>confirmed</code> flag. Arrives async <em>after</em> the paint and overlaps it, so it is not added on top of render in the click→verified total. Unconfirmed probes are excluded from the stats</td>
+                  <td className="p-2">~1.3 s (0.7-2.4 s)</td>
                 </tr>
               </tbody>
             </table>
             <p className="mt-3 text-slate-400">
-              <strong>Why segment 5 matters:</strong> The Streamlit version of this demo intentionally hides
+              <strong>Why segment 5 (the paint) matters:</strong> The Streamlit version of this demo intentionally hides
               render time because the full-script-rerun is ~1.6 s (up to 3.4 s p95) and dominates the chart. React renders
               the diff in one paint cycle, so we show it. That&apos;s the whole point of this fork.
             </p>
@@ -613,6 +637,7 @@ export default function LiveDeskPage() {
       <section className="grid grid-cols-12 gap-4">
         <div className="col-span-3 space-y-4">
           <EventGenerator />
+          <MarketSimulator />
           <HpaStatus />
           <StressTest />
           <BurstStats />
@@ -625,12 +650,13 @@ export default function LiveDeskPage() {
             </summary>
             <div className="mt-2 space-y-2 leading-relaxed">
               <p>
-                The latency timeline above measures the <em>fastest</em> path: the click&apos;s
-                own POST response carries an immediate server-side IT-poll
-                (<code>SELECT 1 FROM RAW_EVENTS WHERE EVENT_ID = &lt;just-flushed&gt;</code>),
-                so it confirms visibility ~250–1800 ms after the wait_for_flush ack and paints
-                that single row directly. <strong>It is not the tape</strong> — the tape only
-                refreshes when the next snapshot poll lands.
+                The latency timeline above measures the <em>fastest</em> path: React paints the
+                row <strong>optimistically at HPA flush-ack</strong> (~10 ms), before it&apos;s even
+                queryable. Visibility is confirmed separately — the server probes both Interactive
+                Tables (<code>RAW_EVENTS</code> by <code>EVENT_ID</code>, <code>POSITION_BOOK</code> by
+                <code>POSITION_ID</code>+<code>BOOK_TS</code>) <em>after</em> the response returns and
+                pushes the result over the WebSocket (segment 6). <strong>That is not the tape</strong> —
+                the tape only refreshes when the next snapshot poll lands.
               </p>
               <p>The Live Event Tape adds 4 sources of latency on top of that:</p>
               <ol className="list-decimal list-inside space-y-1 ml-2">
@@ -669,11 +695,12 @@ export default function LiveDeskPage() {
                 end-to-end (live median over n={liveDocStats.n} click(s) — sums network + SDK + flush + IT poll + browser update).
               </p>
               <p className="text-slate-400">
-                We could close this gap with: (a) push instead of poll
-                (Server-Sent Events), (b) optimistic prepend of the just-flushed row in the
-                tape store at click time, or (c) shrinking the snapshot interval to 500 ms.
-                We left it at 1.5 s honest polling so this number reflects what an unbiased
-                operator would see.
+                We already close most of this gap two ways: the <strong>WebSocket push</strong> path
+                (optimistic + verified + IT-visible, sub-100 ms wire) and the <strong>Optimistic
+                preview</strong> toggle that prepends the just-flushed row at click time. We keep the
+                snapshot poll at an honest 1.5 s as the reconciliation truth-source, so this tape-lag
+                number reflects what an unbiased operator sees on the poll path (shrinking it to 500 ms
+                would cut the wait further at more query cost).
               </p>
             </div>
           </details>
@@ -685,6 +712,10 @@ export default function LiveDeskPage() {
       {/* Portfolio Dashboard */}
       <section>
         <h2 className="text-lg font-semibold mb-4">Portfolio Dashboard</h2>
+        <p className="text-xs text-slate-400 -mt-3 mb-4">
+          Every tile below is the live position book, recomputed at query time from the streamed
+          events on the Interactive Warehouse — no batch job, no cache to warm.
+        </p>
 
         {/* Day metrics — cumulative today KPIs */}
         <DayMetrics />
@@ -695,15 +726,17 @@ export default function LiveDeskPage() {
         {/* Sector + Top Marks */}
         <div className="grid grid-cols-2 gap-4 mt-4">
           <div>
-            <h3 className="text-sm font-medium text-slate-300 mb-2">
+            <h3 className="text-sm font-medium text-slate-300 mb-1">
               Sector Exposure
             </h3>
+            <p className="text-[11px] text-slate-500 mb-2">Par amount by sector — where the book&apos;s risk is concentrated.</p>
             <SectorDonut />
           </div>
           <div>
-            <h3 className="text-sm font-medium text-slate-300 mb-2">
+            <h3 className="text-sm font-medium text-slate-300 mb-1">
               Top 10 Mark Moves
             </h3>
+            <p className="text-[11px] text-slate-500 mb-2">Largest price moves today (|Δbps|) — the positions moving the P&amp;L most.</p>
             <TopMarks />
           </div>
         </div>

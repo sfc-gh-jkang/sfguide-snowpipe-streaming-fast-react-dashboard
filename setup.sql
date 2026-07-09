@@ -85,6 +85,49 @@ CREATE INTERACTIVE TABLE ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS (
 )
 CLUSTER BY (EVENT_TS);
 
+-- POSITION_BOOK is a SECOND INTERACTIVE TABLE — the producer maintains a running
+-- per-position book in memory and WRITE-THROUGHs the fully pre-computed book line
+-- (CURRENT_MARK/PNL_TODAY/RATING already combined) into it on every event, via a
+-- parallel HPA channel (auto-pipe POSITION_BOOK-STREAMING). This is the "replaces
+-- Redis" pattern done the fresh way: the WRITER maintains the hot cache, so reads
+-- are a cheap latest-per-position scan of pre-aggregated rows with ZERO refresh
+-- lag — unlike a TARGET_LAG dynamic table, which would add ingestion→refresh
+-- staleness. Serving strategy 2 reads this table; strategies 1 & 3 aggregate
+-- RAW_EVENTS at query time. It is append-only (streaming), so reads still take the
+-- latest row per position, but each row is pre-combined. CLUSTER BY (POSITION_ID)
+-- so the latest-per-position window prunes tightly.
+--
+-- RETENTION / COMPACTION PLAN (append-only growth): one row accumulates per event
+-- per position, so the table grows with event volume. The latest-per-position read
+-- stays correct regardless, and CLUSTER BY (POSITION_ID) co-locates each position's
+-- rows so the scan prunes — sufficient for a demo (62 positions, modest rate) for
+-- days/weeks. For a long-running deployment, compact by recreating the table and
+-- re-streaming the current 62-row book snapshot from the producer off-hours (you
+-- cannot DELETE — interactive tables reject DML); or have the producer emit a
+-- periodic per-position heartbeat so the read can safely filter to a recent window
+-- without dropping quiet positions. Time Travel + storage lifecycle policies are
+-- the longer-term Snowflake-managed path once available for interactive tables.
+DROP PIPE IF EXISTS ${APP_DB}.${APP_SCHEMA}."POSITION_BOOK-STREAMING";
+DROP TABLE IF EXISTS ${APP_DB}.${APP_SCHEMA}.POSITION_BOOK;
+
+CREATE INTERACTIVE TABLE ${APP_DB}.${APP_SCHEMA}.POSITION_BOOK (
+    POSITION_ID     VARCHAR     NOT NULL,
+    BOOK_TS         TIMESTAMP_NTZ NOT NULL,
+    LAST_EVENT_TYPE VARCHAR,
+    ISSUER          VARCHAR,
+    SECTOR          VARCHAR,
+    TRANCHE         VARCHAR,
+    PAR_AMOUNT      NUMBER(18,2),
+    FUND            VARCHAR,
+    WATCHLIST       BOOLEAN,
+    CURRENT_MARK    NUMBER(10,4),
+    OPENING_MARK    NUMBER(10,4),
+    MARK_CHANGE_BPS NUMBER(18,4),
+    PNL_TODAY       NUMBER(24,4),
+    RATING          VARCHAR
+)
+CLUSTER BY (POSITION_ID);
+
 CREATE TABLE IF NOT EXISTS ${APP_DB}.${APP_SCHEMA}.POSITIONS_DIM (
     POSITION_ID         VARCHAR     NOT NULL PRIMARY KEY,
     ISSUER              VARCHAR     NOT NULL,
@@ -203,8 +246,13 @@ CREATE WAREHOUSE IF NOT EXISTS ${INTERACTIVE_WH}
   INITIALLY_SUSPENDED = TRUE
   COMMENT = 'ACME demo Interactive WH';
 
--- Associate the streaming target so the Interactive WH can serve it.
-ALTER WAREHOUSE ${INTERACTIVE_WH} ADD TABLES (${APP_DB}.${APP_SCHEMA}.RAW_EVENTS);
+-- Associate the streaming targets so the Interactive WH can serve them. Both
+-- RAW_EVENTS (strategies 1 & 3, query-time rollup) and POSITION_BOOK (strategy 2,
+-- pre-agg write-through) are interactive tables served by this same WH.
+ALTER WAREHOUSE ${INTERACTIVE_WH} ADD TABLES (
+  ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS,
+  ${APP_DB}.${APP_SCHEMA}.POSITION_BOOK
+);
 
 -- -------------------------------------------------------------------------
 -- 6. Ingest role + user placeholder
@@ -224,6 +272,9 @@ GRANT USAGE ON WAREHOUSE ${STANDARD_WH} TO ROLE ${INGEST_ROLE};
 GRANT CREATE PIPE ON SCHEMA ${APP_DB}.${APP_SCHEMA} TO ROLE ${INGEST_ROLE};
 GRANT INSERT ON TABLE ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS TO ROLE ${INGEST_ROLE};
 GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS TO ROLE ${INGEST_ROLE};
+-- POSITION_BOOK write-through target (strategy 2) — producer streams pre-agg rows.
+GRANT INSERT ON TABLE ${APP_DB}.${APP_SCHEMA}.POSITION_BOOK TO ROLE ${INGEST_ROLE};
+GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.POSITION_BOOK TO ROLE ${INGEST_ROLE};
 GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.POSITIONS_DIM TO ROLE ${INGEST_ROLE};
 
 -- CREATE USER IF NOT EXISTS CREDIT_INGEST_USR
@@ -392,6 +443,7 @@ GRANT USAGE ON SCHEMA ${APP_DB}.${APP_SCHEMA} TO ROLE ${DASHBOARD_ROLE};
 GRANT USAGE ON WAREHOUSE ${INTERACTIVE_WH} TO ROLE ${DASHBOARD_ROLE};
 GRANT USAGE ON WAREHOUSE ${STANDARD_WH} TO ROLE ${DASHBOARD_ROLE};
 GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.RAW_EVENTS TO ROLE ${DASHBOARD_ROLE};
+GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.POSITION_BOOK TO ROLE ${DASHBOARD_ROLE};
 GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.POSITIONS_DIM TO ROLE ${DASHBOARD_ROLE};
 GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.${APP_CONFIG_TABLE} TO ROLE ${DASHBOARD_ROLE};
 GRANT USAGE ON AGENT ${APP_DB}.${APP_SCHEMA}.${AGENT_NAME} TO ROLE ${DASHBOARD_ROLE};
