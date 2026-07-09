@@ -261,18 +261,27 @@ flowchart TB
 
 ## Quickstart
 
-### TL;DR — one command
+### Choose where the producer runs
+
+The only piece outside Snowflake is the small event **producer** (Python + Snowpipe Streaming HPA SDK). Run it either way — the Snowflake objects, dashboard, and deploy steps are **identical**:
+
+| Option | Producer host | Tunnel | Best for |
+|---|---|---|---|
+| **A — Local** | Your laptop (Docker) | Cloudflare quick tunnel (ephemeral URL) | Fastest path, personal demos, **no cloud account / no GCP** |
+| **B — VM** | Any cloud VM (AWS / Azure / GCP) or on-prem | Named Cloudflare tunnel (stable URL) | Shared or long-lived demos, stable hostname |
+
+Both require `snow` CLI 3.0+ with an ACCOUNTADMIN connection. Option A also needs Docker + `openssl` + `python3` on your laptop.
+
+### Option A — Local (one command)
 
 ```bash
 ./quickstart.sh <your-snow-connection>
 ```
 
-On a fresh account this does everything: writes `.env`, auto-detects your account, generates the ingest keypair, provisions all Snowflake objects, creates the `CREDIT_INGEST_USR` service user, starts the producer + a **local Cloudflare quick tunnel in Docker** (no cloud, no GCP, no public IP), captures the ephemeral tunnel URL, and deploys the dashboard. Idempotent and re-runnable. Stop the local producer/tunnel with `./quickstart.sh --down`.
-
-Then `snow app open --connection <your-snow-connection>` to launch it. Prereqs: `snow` CLI 3.0+ with an ACCOUNTADMIN connection, Docker running, `openssl`, `python3`.
+Runs the producer + a local Cloudflare quick tunnel in Docker (no cloud, no GCP, no public IP). It writes `.env`, auto-detects your account, generates the ingest keypair, provisions all Snowflake objects, creates the `CREDIT_INGEST_USR` service user, captures the ephemeral tunnel URL, and deploys the dashboard. Idempotent and re-runnable. Stop the local producer/tunnel with `./quickstart.sh --down`. Then `snow app open --connection <your-snow-connection>`.
 
 <details>
-<summary>Prefer to run the steps yourself? (manual)</summary>
+<summary>What the one command does, step by step (or to run it manually)</summary>
 
 ```bash
 cp .env.example .env                # fill SNOWFLAKE_CONNECTION + SNOWFLAKE_ACCOUNT
@@ -286,6 +295,22 @@ docker logs credit-cloudflared-quick | grep trycloudflare    # paste host into t
 cd .. && ./deploy-app.sh            # push tunnel config + deploy the app
 ```
 </details>
+
+### Option B — VM (cloud or on-prem)
+
+Use a VM when you want a **stable hostname** and a long-lived demo. It runs on **any** cloud (AWS EC2, Azure VM, GCP Compute Engine) or on-prem — GCP is not special. The Snowflake side is the same `deploy-app.sh` flow; only the producer host + tunnel differ:
+
+```bash
+cp .env.example .env                # fill SNOWFLAKE_CONNECTION + SNOWFLAKE_ACCOUNT
+./deploy-app.sh --infra-only        # provision Snowflake objects
+# create CREDIT_INGEST_USR with your keypair (same snippet as Option A above)
+# on the VM: copy vm-ingest/ + the keypair, set vm-ingest/.env, and start the producer
+#            behind a NAMED Cloudflare tunnel (stable URL) — see "VM ingest setup" below (Paths B/C/D)
+# put the stable tunnel host into the top-level .env, then:
+./deploy-app.sh                     # push tunnel config + deploy the app
+```
+
+See [VM ingest setup](#vm-ingest-setup) for the tunnel patterns (named tunnel, host-installed cloudflared, or Terraform).
 
 ### 0. Prerequisites
 
@@ -428,22 +453,29 @@ After `./deploy-app.sh --bootstrap` completes, your account contains the followi
 | Cortex Search Service | `CREDIT_SEARCH_SVC` | `SEARCH_SERVICE_NAME` | Fuzzy issuer lookup for the agent |
 | SPCS Snowflake App | `CREDIT_DASHBOARD` | `DASHBOARD_APP_NAME` | The Next.js service itself |
 
-The actual `CREDIT_INGEST_USR` user is **not** created automatically — you create it manually with the public key from §2 above.
+The `CREDIT_INGEST_USR` user is created for you by `quickstart.sh` (Option A, from the generated keypair). If you provision manually or use Option B, create it with the public key from §2 above.
 
 ## VM ingest setup
 
-The VM runs a small FastAPI service (`vm-ingest/streaming_service.py`) that receives `/ingest` POSTs from the SPCS dashboard, validates the API key, and writes to `RAW_EVENTS` via the Snowpipe Streaming HPA SDK with keypair JWT auth. Cloudflare Tunnel handles the public-internet hop so SPCS doesn't need to know your VM's IP.
+The producer is a small FastAPI service (`vm-ingest/ingest_worker.py`) that receives `/ingest` POSTs from the SPCS dashboard, validates the API key, and writes to `RAW_EVENTS` (+ the `POSITION_BOOK` pre-agg) via the Snowpipe Streaming HPA SDK with keypair JWT auth. Cloudflare Tunnel handles the public-internet hop so SPCS never needs the producer's IP.
 
-There are four supported tunnel patterns — pick whichever matches your environment:
+Four tunnel patterns, grouped by the two producer-host options from the Quickstart:
+
+**Option A — Local (laptop):**
 
 | Path | Best for | Hostname stability | Setup time |
 |---|---|---|---|
-| **A. Quick tunnel** (`docker compose --profile quick`) | Smoke-test, single-laptop demo | Ephemeral `*.trycloudflare.com`, changes on every restart | ~30 s |
+| **A. Quick tunnel** (`docker compose --profile quick` — what `quickstart.sh` uses) | Personal demos, smoke-tests | Ephemeral `*.trycloudflare.com`, changes on every restart | ~30 s |
+
+**Option B — VM (any cloud or on-prem):**
+
+| Path | Best for | Hostname stability | Setup time |
+|---|---|---|---|
 | **B. Named tunnel via API** (compose-embedded with `CLOUDFLARE_TUNNEL_TOKEN`) | Repeatable demos with a stable URL | Stable hostname survives restarts | ~5 min (one-time Cloudflare dashboard step) |
 | **C. `vm-bootstrap.sh`** (host-installed cloudflared + systemd unit on Ubuntu) | Production-shaped on a long-lived VM | Stable hostname; survives VM reboots | ~10 min |
-| **D. Terraform** (`vm-ingest/terraform/`) | Reproducible from-scratch GCP provisioning | Stable hostname + GCP VM lifecycle managed | ~5 min after `terraform apply` |
+| **D. Terraform** (`vm-ingest/terraform/`) | Reproducible from-scratch GCP provisioning (adapt the provider for AWS/Azure) | Stable hostname + VM lifecycle managed | ~5 min after `terraform apply` |
 
-All four paths set `INGEST_TUNNEL_HOST` to a Cloudflare-issued hostname routed to `VM:8080`. Whichever you pick, paste the resulting hostname into the top-level `.env` and re-run `./deploy-app.sh` (no `--bootstrap` needed) — that updates `APP_CONFIG` and the EAI network rule.
+All paths set `INGEST_TUNNEL_HOST` to a Cloudflare-issued hostname routed to the producer's `:8080`. Whichever you pick, put the hostname in the top-level `.env` and re-run `./deploy-app.sh` (no `--bootstrap` needed) — that updates `APP_CONFIG` and the EAI network rule. (`quickstart.sh` does this automatically for Path A.)
 
 See `vm-ingest/README.md` for the per-path commands and `TESTING.md` for the verified outcomes of each.
 
