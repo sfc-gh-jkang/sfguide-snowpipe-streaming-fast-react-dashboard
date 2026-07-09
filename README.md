@@ -30,6 +30,45 @@ What you see when you run this demo:
 3. Switch to "Ask the Book" tab → ask "What was our most recent trade?" → Cortex Agent calls Cortex Analyst (semantic view) + Cortex Search → streams answer back in 5-10 s
 4. Open the "How fresh & fast?" tab → hit **Fire & measure** → every freshness/latency/lag component is explained in plain English, shown with live measured values, and reconciled so the parts add up to the end-to-end
 
+## Screenshots
+
+**Live Credit Desk** (`/`) — real-time trade tape, KPI tiles, P&L, sector exposure, top marks, watchlist, and the latency timeline; fire TRADE/MARK/CREDIT and watch rows commit via Snowpipe Streaming HPA:
+
+![Live Credit Desk](docs/screenshot-desk.png)
+
+**Demo control room** (`/demo`) — Fresh vs Fast cards, the Live Market simulator, the interactive-latency widget, and the three-way serving-strategy comparison with a totals-match check:
+
+![Demo control room](docs/screenshot-demo.png)
+
+**How fresh & fast?** (`/latency`) — plain-English breakdown of every freshness/latency/lag component, live measured values per step, and the per-event "do the parts add up?" reconciliation:
+
+![How fresh and fast explainer](docs/screenshot-latency.png)
+
+**Ask the Book** (`/ask`) — Cortex Agent chat (Cortex Analyst semantic view + Cortex Search) answering questions about the live position book, streamed token-by-token over SSE:
+
+![Ask the Book](docs/screenshot-ask.png)
+
+<details>
+<summary>More views (click to expand)</summary>
+
+**End-to-end: click → fresh dashboard** — the swim-lane breakdown with every layer populated (click pipeline, IT visibility, WebSocket push, render) next to the Streamlit baseline:
+
+![End-to-end swim lanes](docs/screenshot-endtoend.png)
+
+**Serving strategy comparison** — the same book served three ways on the Interactive Warehouse (query-time window rollup / pre-agg write-through / MAX_BY), live read latencies, `totals match ✓`, and the freshness breakdown:
+
+![Serving strategy comparison](docs/screenshot-serving.png)
+
+**Latency timeline + Event Generator** — per-click stacked segments (network / SDK / flush / VM / render / IT poll), the TRADE/MARK/CREDIT fire buttons, and the live event tape:
+
+![Latency timeline and event generator](docs/screenshot-timeline.png)
+
+**Do the parts add up?** — the per-step component table (typical / median / last) and the single-event reconciliation where the disjoint parts sum exactly to the measured end-to-end:
+
+![Latency component reconciliation](docs/screenshot-reconcile.png)
+
+</details>
+
 ## Why this fork exists
 
 The latency table below mixes three number sources — live in-browser measurements, a 2026-07-07 re-benchmark of this fork's serving queries on the current architecture, and a historical Streamlit baseline. Each row is labeled, and the **Number provenance** note under the table spells out exactly what is measured live vs stored (see also `web/src/lib/baseline.ts`):
