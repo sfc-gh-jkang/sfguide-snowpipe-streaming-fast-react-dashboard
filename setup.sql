@@ -254,6 +254,12 @@ ALTER WAREHOUSE ${INTERACTIVE_WH} ADD TABLES (
   ${APP_DB}.${APP_SCHEMA}.POSITION_BOOK
 );
 
+-- CREATE WAREHOUSE above set the INTERACTIVE WH as the session's current
+-- warehouse. Switch back to the standard WH so the rest of this script (network
+-- rules, Cortex Search build) does NOT run on the interactive WH — which has a
+-- 5s query timeout and cannot query non-interactive tables like POSITIONS_DIM.
+USE WAREHOUSE ${STANDARD_WH};
+
 -- -------------------------------------------------------------------------
 -- 6. Ingest role + user placeholder
 --    The service user requires an RSA keypair — generate manually:
@@ -311,8 +317,12 @@ CREATE COMPUTE POOL IF NOT EXISTS CREDIT_POOL
 CREATE OR REPLACE NETWORK RULE ${APP_DB}.${APP_SCHEMA}.CREDIT_INGEST_RULE
   MODE = EGRESS
   TYPE = HOST_PORT
-  VALUE_LIST = ('${INGEST_TUNNEL_HOST}:443')
-  COMMENT = 'Legacy SiS rule — points at the same tunnel as the dashboard';
+  -- Resolvable stub host. Some accounts validate that egress hosts resolve in
+  -- DNS at CREATE time, so we can't use a placeholder/unresolved host here. This
+  -- legacy rule is unused by the React dashboard; the real tunnel host is set on
+  -- the dashboard rule below by deploy-app.sh.
+  VALUE_LIST = ('example.com:443')
+  COMMENT = 'Legacy SiS rule — resolvable stub host';
 
 CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION CREDIT_INGEST_EAI
   ALLOWED_NETWORK_RULES = (${APP_DB}.${APP_SCHEMA}.CREDIT_INGEST_RULE)
@@ -411,8 +421,11 @@ CREATE COMPUTE POOL IF NOT EXISTS ${DASHBOARD_POOL}
 CREATE OR REPLACE NETWORK RULE ${APP_DB}.${APP_SCHEMA}.${INGEST_NETWORK_RULE}
   MODE = EGRESS
   TYPE = HOST_PORT
-  VALUE_LIST = ('${INGEST_TUNNEL_HOST}:443')
-  COMMENT = 'Dashboard egress to VM ingest tunnel — written from .env at bootstrap';
+  -- Resolvable stub — deploy-app.sh CREATE OR REPLACEs this with the real
+  -- INGEST_TUNNEL_HOST once the tunnel is up (a not-yet-live host fails on
+  -- accounts that DNS-validate egress rules at CREATE time).
+  VALUE_LIST = ('example.com:443')
+  COMMENT = 'Dashboard egress to VM ingest tunnel — stub host, rewritten by deploy-app.sh';
 
 -- Permissive build-time rule + EAI. snow app deploy uses build_eai during the
 -- npm install phase to fetch packages from registry.npmjs.org and friends.

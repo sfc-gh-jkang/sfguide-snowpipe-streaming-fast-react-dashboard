@@ -56,14 +56,27 @@ set_env() {
 }
 is_placeholder() { [[ -z "${1:-}" || "$1" == "<"*">" ]]; }
 
+# Parse KEY=VALUE lines WITHOUT `source` — placeholder values like
+# `<your-connection>` contain `<`/`>` that break `source`. Reads literally.
+load_env() {
+  set -a
+  while IFS= read -r _line || [[ -n "$_line" ]]; do
+    [[ "$_line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$_line" != *"="* ]] && continue
+    _key="${_line%%=*}"; _key="${_key//[[:space:]]/}"
+    [[ -z "$_key" ]] && continue
+    export "$_key=${_line#*=}"
+  done <"$1"
+  set +a
+}
+
 # --- 2. .env scaffold -----------------------------------------------------
 info "Preparing .env..."
 if [[ ! -f "$ENV_FILE" ]]; then
   cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
   green "  created .env from .env.example"
 fi
-# shellcheck disable=SC1090
-set -a; source "$ENV_FILE"; set +a
+load_env "$ENV_FILE"
 
 # Connection: arg wins, else existing .env value.
 CONN="${1:-${SNOWFLAKE_CONNECTION:-}}"
@@ -101,7 +114,7 @@ if is_placeholder "${INGEST_API_KEY:-}"; then
 fi
 
 # Re-source so later steps see the freshly written values.
-set -a; source "$ENV_FILE"; set +a
+load_env "$ENV_FILE"
 
 # --- 3. Keypair for the ingest service user -------------------------------
 info "Ensuring the ingest keypair exists..."
@@ -127,10 +140,17 @@ snow sql --connection "$CONN" --enable-templating NONE -q "
 CREATE USER IF NOT EXISTS CREDIT_INGEST_USR
   TYPE = SERVICE
   RSA_PUBLIC_KEY = '${PUBKEY}'
+  DEFAULT_WAREHOUSE = ${STANDARD_WH}
+  DEFAULT_ROLE = ${INGEST_ROLE}
   COMMENT = 'Snowpipe Streaming producer service account (quickstart)';
--- Keep the key in sync with the local keypair even if the user pre-existed
--- (a stale key would fail the producer's JWT auth with a confusing error).
-ALTER USER CREDIT_INGEST_USR SET RSA_PUBLIC_KEY = '${PUBKEY}';
+-- Keep the key + defaults in sync even if the user pre-existed. The producer's
+-- non-streaming queries (load POSITIONS_DIM, hydrate book from RAW_EVENTS) need
+-- an active warehouse + role; without DEFAULT_WAREHOUSE they fail with
+-- 'No active warehouse selected'.
+ALTER USER CREDIT_INGEST_USR SET
+  RSA_PUBLIC_KEY = '${PUBKEY}'
+  DEFAULT_WAREHOUSE = ${STANDARD_WH}
+  DEFAULT_ROLE = ${INGEST_ROLE};
 GRANT ROLE ${INGEST_ROLE} TO USER CREDIT_INGEST_USR;
 "
 green "  CREDIT_INGEST_USR ready (keypair auth)"

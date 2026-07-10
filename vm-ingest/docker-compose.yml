@@ -23,10 +23,10 @@ services:
       PARTITION_COUNT: "4"
       INGEST_API_KEY: "${INGEST_API_KEY:-<set-via-env-INGEST_API_KEY>}"
       OTEL_SERVICE_NAME: "credit-ingest"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://observe-agent:4318"
+      # Empty by default (OTEL disabled) — set when running the optional
+      # observe-agent sidecar (`--profile observe`).
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
       OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
-    depends_on:
-      - observe-agent
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 15s
@@ -38,6 +38,11 @@ services:
     image: observeinc/observe-agent:2.0.0
     container_name: credit-observe-agent
     restart: unless-stopped
+    # Optional OpenTelemetry → Observe.inc sidecar. Opt-in only: needs a
+    # generated observe-agent.yaml (from observe-agent.yaml.tpl + Observe tokens).
+    # NOT started by the local quickstart (`--profile quick`); enable with
+    # `--profile observe` once you've created observe-agent.yaml.
+    profiles: [observe]
     volumes:
       - ./observe-agent.yaml:/etc/observe-agent/observe-agent.yaml:ro
     healthcheck:

@@ -38,7 +38,18 @@ if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
   echo "ERROR: .env not found. Copy .env.example → .env and fill in values."
   exit 1
 fi
-set -a; source "$SCRIPT_DIR/.env"; set +a
+# Parse KEY=VALUE lines WITHOUT `source` — values like `<your-tunnel-host>`
+# contain shell metacharacters (`<`, `>`) that break `source`. This reads each
+# line literally and exports it (no evaluation of the value).
+set -a
+while IFS= read -r _line || [[ -n "$_line" ]]; do
+  [[ "$_line" =~ ^[[:space:]]*# ]] && continue
+  [[ "$_line" != *"="* ]] && continue
+  _key="${_line%%=*}"; _key="${_key//[[:space:]]/}"
+  [[ -z "$_key" ]] && continue
+  export "$_key=${_line#*=}"
+done <"$SCRIPT_DIR/.env"
+set +a
 
 # --- Validate required vars (fail loudly with a useful error) ---
 required=(
