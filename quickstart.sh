@@ -51,12 +51,14 @@ free_port() {
 CONN_ARG=""
 WATCH=false
 DOWN=false
+TEARDOWN=false
 for a in "$@"; do
   case "$a" in
-    --down)  DOWN=true ;;
-    --watch) WATCH=true ;;
-    --*)     die "Unknown flag: $a  (use --watch to self-heal the quick tunnel, or --down to stop)" ;;
-    *)       CONN_ARG="$a" ;;
+    --down)     DOWN=true ;;
+    --teardown) TEARDOWN=true ;;
+    --watch)    WATCH=true ;;
+    --*)        die "Unknown flag: $a  (--watch self-heals the quick tunnel, --down stops containers, --teardown stops containers + drops the SPCS app)" ;;
+    *)          CONN_ARG="$a" ;;
   esac
 done
 
@@ -71,6 +73,22 @@ if [[ "$DOWN" == "true" ]]; then
     ( cd "$VM_DIR" && docker compose --profile quick --profile tunnel --profile observe down )
   fi
   green "Stopped. (Snowflake objects are left intact.)"
+  exit 0
+fi
+
+# --- --teardown: stop containers AND drop the deployed SPCS app -----------
+# Full "app instance" removal for a demo account you're done with. Keeps the
+# demo DB objects (schema / warehouses / pool / role / EAI) so a later
+# ./quickstart.sh redeploys quickly. Requires the connection name.
+if [[ "$TEARDOWN" == "true" ]]; then
+  [[ -n "$CONN_ARG" ]] || die "Pass the connection: ./quickstart.sh --teardown <connection-name>"
+  info "Stopping local producer + tunnel(s) for '$CONN_ARG'..."
+  ( cd "$VM_DIR" && docker compose -p "credit-$(sanitize_instance "$CONN_ARG")" --profile quick --profile tunnel --profile observe down ) || true
+  info "Dropping the deployed SPCS app on '$CONN_ARG'..."
+  # deploy-app.sh reads SNOWFLAKE_CONNECTION from this clone's .env (one clone
+  # per account), which matches CONN_ARG in the normal flow.
+  "$SCRIPT_DIR/deploy-app.sh" --teardown
+  green "Teardown complete for '$CONN_ARG'. (Demo DB objects left intact.)"
   exit 0
 fi
 
@@ -321,6 +339,7 @@ green "Quickstart complete."
 echo "  • Open the dashboard:  snow app open --connection $CONN"
 echo "  • Fire events on the Live Credit Desk tab, or click 'Live Market' on /demo"
   echo "  • Stop the local producer + tunnel when done:  ./quickstart.sh --down $CONN"
+echo "  • Remove this demo entirely (containers + SPCS app):  ./quickstart.sh --teardown $CONN"
 echo ""
 echo "This instance is namespaced '$INSTANCE' (compose project credit-$INSTANCE) — run"
 echo "another account from its own clone and it won't collide with this one."

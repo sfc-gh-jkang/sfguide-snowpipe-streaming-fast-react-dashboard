@@ -420,23 +420,39 @@ For SQL changes (schema, agent spec, semantic view), re-run `--bootstrap` — it
 ### 6. Teardown
 
 ```bash
-# Stop + remove the SPCS app
-snow app teardown --connection "$SNOWFLAKE_CONNECTION" --cascade
+# Stop the local producer + tunnel only (Snowflake untouched):
+./quickstart.sh --down <connection>
 
-# Optional: drop the schema's demo objects (keeps the database)
-snow sql --connection "$SNOWFLAKE_CONNECTION" --query "
+# Stop containers AND drop the deployed SPCS app (keeps demo DB objects):
+./quickstart.sh --teardown <connection>
+# ...or drop just the app from a non-quickstart deploy:
+./deploy-app.sh --teardown
+```
+
+`--teardown` runs `snow app teardown` under the hood. Two things that trip people up, both handled by the script:
+- The dashboard is a `snowflake-app` entity, so it materializes as an **application service** (`SNOWFLAKE_EXAMPLE.CREDIT_DEMO.CREDIT_DASHBOARD`), **not** a global `APPLICATION` — it won't show in `SHOW APPLICATIONS`, and `DROP APPLICATION` won't find it. `snow app teardown` is the correct removal.
+- `snow app teardown` needs the **rendered** `snowflake.yml` (the template's `${VAR}` tokens must be substituted first). `deploy-app.sh --teardown` renders + swaps it in for you. `--cascade` is Native-App-only and is intentionally not used.
+
+For a **full clean slate** (also drop the demo Snowflake objects — the compute pool stops billing the moment it's dropped):
+
+```bash
+snow sql --connection <connection> --query "
   USE ROLE ACCOUNTADMIN;
-  DROP AGENT IF EXISTS ${APP_DB}.${APP_SCHEMA}.${AGENT_NAME};
-  DROP CORTEX SEARCH SERVICE IF EXISTS ${APP_DB}.${APP_SCHEMA}.${SEARCH_SERVICE_NAME};
-  DROP SEMANTIC VIEW IF EXISTS ${APP_DB}.${APP_SCHEMA}.${SEMANTIC_VIEW_NAME};
-  DROP EXTERNAL ACCESS INTEGRATION IF EXISTS ${DASHBOARD_EAI};
-  DROP COMPUTE POOL IF EXISTS ${DASHBOARD_POOL};
-  DROP ROLE IF EXISTS ${DASHBOARD_ROLE};
-  DROP ROLE IF EXISTS ${INGEST_ROLE};
+  DROP AGENT IF EXISTS SNOWFLAKE_EXAMPLE.CREDIT_DEMO.CREDIT_AGENT;
+  DROP CORTEX SEARCH SERVICE IF EXISTS SNOWFLAKE_EXAMPLE.CREDIT_DEMO.POSITIONS_SEARCH;
+  DROP SEMANTIC VIEW IF EXISTS SNOWFLAKE_EXAMPLE.CREDIT_DEMO.CREDIT_SV;
+  DROP EXTERNAL ACCESS INTEGRATION IF EXISTS DASHBOARD_VM_EAI;
+  DROP COMPUTE POOL IF EXISTS DASHBOARD_POOL;
+  DROP WAREHOUSE IF EXISTS CREDIT_DEMO_WH;
+  DROP WAREHOUSE IF EXISTS CREDIT_DEMO_INT_WH;
+  DROP USER IF EXISTS CREDIT_INGEST_USR;
+  DROP ROLE IF EXISTS DASHBOARD_RL;
+  DROP ROLE IF EXISTS CREDIT_INGEST_RL;
+  DROP SCHEMA IF EXISTS SNOWFLAKE_EXAMPLE.CREDIT_DEMO;
 "
 ```
 
-The compute pool stops billing the moment it's dropped. The Interactive Warehouse keeps charging credits until you drop or `ALTER WAREHOUSE ... SUSPEND` it (see [Cost note](#cost-note)).
+The Interactive Warehouse keeps charging credits until you drop or `ALTER WAREHOUSE ... SUSPEND` it (see [Cost note](#cost-note)).
 
 ## What gets created in your account
 
@@ -528,8 +544,8 @@ At a typical effective enterprise rate (~$2/credit) this demo idle costs roughly
 | `setup.sql` | Single source of truth for all Snowflake DDL (database/schema/warehouses/pool/EAI/roles/tables/agent/search service/grants), envsubst-templated from `.env` |
 | `semantic_view.sql` | Defines `CREDIT_SV` for the agent's text-to-SQL tool, also envsubst-templated |
 | `web/snowflake.yml` | Snowflake App manifest for SPCS deployment, envsubst-templated |
-| `quickstart.sh` | One command for a fresh account: scaffolds `.env`, generates the ingest keypair, provisions objects (`--infra-only`), creates the ingest user, starts the local producer + tunnel, captures the URL, and deploys. Uses a named tunnel automatically if `CLOUDFLARE_TUNNEL_TOKEN` is set, else the quick tunnel. `--watch` self-heals a rotated quick-tunnel URL (re-pushes to `APP_CONFIG` + network rule); `--down` stops the local containers |
-| `deploy-app.sh` | Render templates → run setup SQL (`--bootstrap` / `--infra-only`) → push runtime config → `snow app deploy` |
+| `quickstart.sh` | One command for a fresh account: scaffolds `.env`, generates the ingest keypair, provisions objects (`--infra-only`), creates the ingest user, starts the local producer + tunnel, captures the URL, and deploys. Uses a named tunnel automatically if `CLOUDFLARE_TUNNEL_TOKEN` is set, else the quick tunnel. Namespaces each instance by connection (compose project + container names + free host port) so accounts coexist. `--watch` self-heals a rotated quick-tunnel URL; `--down <conn>` stops the local containers; `--teardown <conn>` also drops the SPCS app |
+| `deploy-app.sh` | Render templates → run setup SQL (`--bootstrap` / `--infra-only`) → push runtime config → `snow app deploy`. `--render-only` renders without deploying; `--teardown` drops the deployed SPCS app (renders `snowflake.yml` first, then `snow app teardown`) |
 | `.env.example` | All 23 envsubst variables with documented defaults |
 | `web/server.js` | Custom standalone server that monkey-patches Next.js's `server.js` to handle WebSocket upgrades on `/api/ws` |
 | `web/src/app/layout.tsx` | Root layout with the four-tab nav (Demo / Live Credit Desk / Ask the Book / How fresh & fast?) and global WS provider |
@@ -671,4 +687,52 @@ These bugs were hit during the initial build. Documenting here so future contrib
 **Root cause**: The OAuth token mounted at `/snowflake/session/token` inside SPCS is a **scoped token** bound to a single role (the app owner role). Sending `role: "DASHBOARD_RL"` in the request body of `/api/v2/statements` triggers a role-switch the token isn't allowed to perform — independent of what the underlying user is granted.
 
 **Fix**: Don't send `role:` in the API body. Let the token use its bound default role. The deploying user's role already has all the read access the dashboard needs (granted via `setup.sql`). The intended read-only scoping (`DASHBOARD_RL`) is preserved at the SQL/object-grant layer; the runtime just doesn't switch into it. See `web/src/server/snowflake-client.ts:72`.
+
+### 7. Creating the Interactive Warehouse hijacks the session's current warehouse
+
+**Symptom**: On a fresh account, `setup.sql` fails partway (e.g. Cortex Search build errors with "Querying non-interactive table ... is not supported in interactive warehouses", or a DDL times out at 5s).
+
+**Root cause**: `CREATE WAREHOUSE <interactive>` sets it as the **session-current warehouse**. Everything after runs on the interactive WH, which has a 5s query timeout and can only query interactive tables.
+
+**Fix**: `setup.sql` runs `USE WAREHOUSE ${STANDARD_WH};` immediately after the interactive-WH block. Any script that creates an interactive warehouse must reset the current warehouse right after.
+
+### 8. Some accounts DNS-validate egress network-rule hosts at CREATE time
+
+**Symptom**: On a fresh Azure account, `CREATE NETWORK RULE ... VALUE_LIST = ('<tunnel-host>:443')` is rejected with "invalid value" when the host doesn't resolve yet.
+
+**Root cause**: Certain accounts resolve egress `HOST_PORT` values at creation time and reject non-resolving hostnames. The tunnel host doesn't exist during `--bootstrap` (it's created later).
+
+**Fix**: `setup.sql` seeds the egress rule with a resolvable stub (`example.com:443`). `deploy-app.sh` then `CREATE OR REPLACE`s it with the real tunnel host once the tunnel is up (and `--watch` keeps it current). Never bake the real tunnel host into `setup.sql`.
+
+### 9. `.env` placeholder values break `source`
+
+**Symptom**: `deploy-app.sh` / `quickstart.sh` fail with `syntax error near unexpected token 'newline'` on a fresh `.env`.
+
+**Root cause**: Placeholder values like `<your-connection>` contain `<` / `>`, which `source`/`.` interpret as shell redirection.
+
+**Fix**: Both scripts parse `.env` with a literal `KEY=VALUE` line reader (no `source`, no evaluation of the value). Keep it that way when adding env handling.
+
+### 10. Ingest service user fails with "No active warehouse selected"
+
+**Symptom**: `POSITION_BOOK` stays empty / `book_flush` is null; producer logs show `000606: No active warehouse selected` on non-streaming SELECTs.
+
+**Root cause**: `CREATE USER ... TYPE=SERVICE` has no default warehouse/role, and the HPA producer runs plain SELECTs (book hydration, `POSITIONS_DIM` load) outside the streaming path.
+
+**Fix**: `quickstart.sh` creates `CREDIT_INGEST_USR` with `DEFAULT_WAREHOUSE = ${STANDARD_WH}` and `DEFAULT_ROLE = ${INGEST_ROLE}`. The manual-create snippet in the README does the same.
+
+### 11. Quick tunnel drops / rotates its URL mid-demo
+
+**Symptom**: Dashboard shows `502 ingest-verified failed: fetch failed` or "VM unreachable" after the tunnel has been up a while or the container restarted.
+
+**Root cause**: The anonymous quick tunnel (a) has its QUIC connection reset on some corporate networks, and (b) gets a **new** `*.trycloudflare.com` URL on every container restart.
+
+**Fix**: cloudflared runs with `--protocol http2` (avoids the QUIC resets). For URL rotation, the app re-reads `APP_CONFIG` every ~60s (`web/src/server/vm-proxy.ts` `CONFIG_TTL_MS`), so a rotated URL self-heals **with no redeploy** once `APP_CONFIG` + the egress rule are updated. Run `./quickstart.sh --watch <connection> &` to push the live URL automatically, or use a **named tunnel** (set `CLOUDFLARE_TUNNEL_TOKEN` + `INGEST_TUNNEL_HOST`) for a stable hostname.
+
+### 12. Two demos on one laptop clobber each other's containers
+
+**Symptom**: Running `quickstart.sh` for a second account stops/removes the first account's producer + tunnel.
+
+**Root cause**: `docker compose` run from each clone's `vm-ingest/` dir defaults to the **same** project name (`vm-ingest`, the dir basename) and shares service keys (`credit-ingest`, `cloudflared-quick`); compose matches containers by project+service and recreates them — even with different `container_name`s.
+
+**Fix**: `quickstart.sh` namespaces every instance by connection: `COMPOSE_PROJECT_NAME=credit-<connection>`, container names `credit-<svc>-<connection>` (via `CREDIT_INSTANCE`), and an auto-picked free host port (`INGEST_HOST_PORT`, 8080 → 8081 → …). Clone once per account and run `./quickstart.sh <connection>` in each — they coexist.
 

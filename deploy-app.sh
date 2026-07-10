@@ -12,6 +12,7 @@
 #   ./deploy-app.sh --bootstrap     # full provision + deploy (fresh account)
 #   ./deploy-app.sh --infra-only    # provision Snowflake objects only (no tunnel host / app deploy) — used by quickstart.sh
 #   ./deploy-app.sh --render-only   # render templates to /tmp; do not deploy
+#   ./deploy-app.sh --teardown      # drop the deployed SPCS app (CREDIT_DASHBOARD) + code stage; keeps demo DB objects
 # =============================================================================
 set -euo pipefail
 
@@ -20,11 +21,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOTSTRAP=false
 RENDER_ONLY=false
 INFRA_ONLY=false
+TEARDOWN=false
 for arg in "$@"; do
   case "$arg" in
     --bootstrap) BOOTSTRAP=true ;;
     --infra-only) INFRA_ONLY=true; BOOTSTRAP=true ;;
     --render-only) RENDER_ONLY=true ;;
+    --teardown) TEARDOWN=true ;;
     -h|--help)
       grep '^# ' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -62,7 +65,7 @@ required=(
 # The tunnel host + API key are only needed for the config-push + app-deploy
 # steps, not for provisioning Snowflake objects. quickstart.sh runs --infra-only
 # BEFORE the tunnel exists, so don't require them then.
-if [[ "$RENDER_ONLY" != "true" && "$INFRA_ONLY" != "true" ]]; then
+if [[ "$RENDER_ONLY" != "true" && "$INFRA_ONLY" != "true" && "$TEARDOWN" != "true" ]]; then
   required+=( INGEST_TUNNEL_HOST INGEST_API_KEY )
 fi
 missing=()
@@ -103,6 +106,30 @@ if [[ "$RENDER_ONLY" == "true" ]]; then
   echo ""
   echo "==> --render-only: rendered files left at $RENDER_DIR"
   echo "    (and $SCRIPT_DIR/web/snowflake.yml.rendered)"
+  exit 0
+fi
+
+# --- Teardown: drop the SPCS app, then stop (keeps demo DB objects) ---
+# `snow app teardown` needs the RENDERED snowflake.yml (the template's ${VAR}
+# tokens would fail to resolve), so we swap it in exactly like the deploy path.
+# The dashboard is a `snowflake-app` entity → it materializes as an APPLICATION
+# SERVICE (SNOWFLAKE_EXAMPLE.CREDIT_DEMO.CREDIT_DASHBOARD), NOT a global
+# APPLICATION — so it won't appear in SHOW APPLICATIONS and `DROP APPLICATION`
+# won't find it. `snow app teardown` is the correct removal. `--cascade` is
+# Native-App-only and is intentionally omitted here.
+if [[ "$TEARDOWN" == "true" ]]; then
+  echo ""
+  echo "==> --teardown: dropping the SPCS app ${DASHBOARD_APP_NAME} + code stage..."
+  cd "$SCRIPT_DIR/web"
+  ORIGINAL_YML="$(mktemp -t snowflake-yml-orig.XXXXXX)"
+  cp snowflake.yml "$ORIGINAL_YML"
+  trap 'mv "$ORIGINAL_YML" "$SCRIPT_DIR/web/snowflake.yml"; rm -f "$SCRIPT_DIR/web/snowflake.yml.rendered"' EXIT
+  mv "$SCRIPT_DIR/web/snowflake.yml.rendered" "$SCRIPT_DIR/web/snowflake.yml"
+  snow app teardown --connection "$SNOWFLAKE_CONNECTION" --force
+  echo ""
+  echo "==> Teardown complete. Demo DB objects (schema / warehouses / pool / role / EAI)"
+  echo "    are left intact. For a full clean slate, drop them manually — see the"
+  echo "    'Teardown' section of the README."
   exit 0
 fi
 

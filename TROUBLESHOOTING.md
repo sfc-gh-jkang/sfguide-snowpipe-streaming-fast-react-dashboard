@@ -71,7 +71,19 @@ This script:
 4. Updates Snowflake's `APP_CONFIG.INGEST_TUNNEL_HOST`
 5. Updates the EAI network rule (so SPCS egress works for the new hostname)
 
-After it runs, refresh the dashboard — clicks reach the worker again. **No `./deploy-app.sh` redeploy needed** because the dashboard reads `APP_CONFIG` on each request.
+After it runs, refresh the dashboard — clicks reach the worker again. **No `./deploy-app.sh` redeploy needed** because the dashboard re-reads `APP_CONFIG` every ~60s (`web/src/server/vm-proxy.ts` `CONFIG_TTL_MS`).
+
+### Laptop quickstart (Path A) — self-healing, no VM
+
+If you ran `./quickstart.sh <connection>` (producer + tunnel in local Docker), keep the URL current automatically:
+
+```bash
+./quickstart.sh --watch <connection> &
+```
+
+`--watch` polls the local `cloudflared` container; whenever the `*.trycloudflare.com` URL changes it re-pushes `INGEST_TUNNEL_HOST` into `APP_CONFIG` and `CREATE OR REPLACE`s the egress network rule. The app self-heals within ~60s — no redeploy. Two related hardenings already in place:
+- **`--protocol http2`** on both cloudflared services — avoids the QUIC connection resets that silently drop the tunnel on corporate networks (symptom: `502 ingest-verified failed: fetch failed` while the container still looks healthy).
+- The quick tunnel only changes its URL on **container restart**; a plain reconnect keeps the same URL.
 
 ### Better long-term: switch to a named tunnel
 If you find yourself running `sync-quick-tunnel.sh` more than once, just spend 5 minutes setting up a named tunnel (Path B in the README). Free Cloudflare account, stable hostname, restart-safe.
@@ -167,7 +179,7 @@ ALTER USER CREDIT_INGEST_USR SET NETWORK_POLICY = CREDIT_INGEST_NP;
 
 Restart the container (`docker restart credit-ingest`) and `channel_count` should climb to 4 within ~10 seconds.
 
-`setup.sql` does NOT ship this network policy — most accounts have an open default policy and don't need it. The `teardown.sh` script DOES drop `CREDIT_INGEST_NP` so re-running setup is safe.
+`setup.sql` does NOT ship this network policy — most accounts have an open default policy and don't need it. If you created `CREDIT_INGEST_NP` manually, drop it manually when you're done (`DROP NETWORK POLICY IF EXISTS CREDIT_INGEST_NP;`) — the `--teardown` path only drops the SPCS app, not this policy.
 
 ### Cortex Agent answers feel slow on first ask (5-15s)
 
@@ -185,6 +197,20 @@ End-to-end is typically **5-10s on a warm warehouse, 10-15s on cold**. This is t
 - Pre-warm `CREDIT_DEMO_WH` 5 minutes before going live: run `SELECT 1` to wake it, set `AUTO_SUSPEND = 600` so it stays warm through the demo
 - Ask one warm-up question off-camera before the demo (this also primes the agent's planning cache)
 - The first SSE event (`response.status` "Planning the next steps") appears within ~1s; the streaming text-delta starts ~3-5s in. The React chat UI shows that progress so users don't see a blank screen
+
+### Running a second account clobbers the first account's containers
+
+Each `quickstart.sh` run is namespaced by connection (compose project `credit-<connection>`, container names `credit-<svc>-<connection>`, auto-picked host port). Clone the repo **once per account** and run `./quickstart.sh <connection>` in each clone — they coexist. Running two accounts from the *same* clone/dir will overwrite the shared `.env` and is not supported for concurrent demos.
+
+### How do I remove a demo?
+
+```bash
+./quickstart.sh --down <connection>       # stop local producer + tunnel only (Snowflake untouched)
+./quickstart.sh --teardown <connection>   # stop containers AND drop the SPCS app (keeps demo DB objects)
+./deploy-app.sh --teardown                # drop just the app (uses this clone's .env connection)
+```
+
+The dashboard is a `snowflake-app` **application service** (`SNOWFLAKE_EXAMPLE.CREDIT_DEMO.CREDIT_DASHBOARD`), not a global `APPLICATION` — `SHOW APPLICATIONS` won't list it and `DROP APPLICATION` won't find it. `snow app teardown` (which `--teardown` runs against the *rendered* `snowflake.yml`) is the correct removal. For a full object drop, see the README "Teardown" section.
 
 ---
 
