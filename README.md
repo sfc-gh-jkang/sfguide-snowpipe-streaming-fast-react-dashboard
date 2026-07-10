@@ -272,6 +272,8 @@ The only piece outside Snowflake is the small event **producer** (Python + Snowp
 
 Both require `snow` CLI 3.0+ with an ACCOUNTADMIN connection. Option A also needs Docker + `openssl` + `python3` on your laptop.
 
+> **Verification status.** Option A (`quickstart.sh`, quick tunnel) is verified end-to-end from a fresh clone on **AWS (us-east-1, us-west-2), Azure, and GCP**, including two demos side-by-side on one laptop. The named-tunnel, host-bootstrap-script, and Terraform variants (Paths B/C/D in [VM ingest setup](#vm-ingest-setup)) are syntax/plan-checked but **not yet live-tested** — the first SE to run one should confirm it and update `TROUBLESHOOTING.md` ("What's tested vs not tested").
+
 ### Option A — Local (one command)
 
 ```bash
