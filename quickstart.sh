@@ -65,9 +65,11 @@ if [[ "$DOWN" == "true" ]]; then
   info "Stopping local producer + tunnel(s)..."
   # Scope to this connection's project if given; else rely on vm-ingest/.env
   # (which carries COMPOSE_PROJECT_NAME from the last run in this clone).
-  DOWN_PROJ=""
-  [[ -n "$CONN_ARG" ]] && DOWN_PROJ="credit-$(sanitize_instance "$CONN_ARG")"
-  ( cd "$VM_DIR" && ${DOWN_PROJ:+COMPOSE_PROJECT_NAME="$DOWN_PROJ"} docker compose --profile quick --profile tunnel --profile observe down )
+  if [[ -n "$CONN_ARG" ]]; then
+    ( cd "$VM_DIR" && docker compose -p "credit-$(sanitize_instance "$CONN_ARG")" --profile quick --profile tunnel --profile observe down )
+  else
+    ( cd "$VM_DIR" && docker compose --profile quick --profile tunnel --profile observe down )
+  fi
   green "Stopped. (Snowflake objects are left intact.)"
   exit 0
 fi
