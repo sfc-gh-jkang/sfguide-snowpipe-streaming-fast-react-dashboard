@@ -59,7 +59,7 @@ services:
     image: cloudflare/cloudflared:2025.7.0
     container_name: credit-cloudflared
     restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    command: tunnel --no-autoupdate --protocol http2 run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       credit-ingest:
         condition: service_healthy
@@ -74,7 +74,7 @@ services:
     image: cloudflare/cloudflared:2025.7.0
     container_name: credit-cloudflared-quick
     restart: unless-stopped
-    command: tunnel --no-autoupdate --url http://credit-ingest:8080
+    command: tunnel --no-autoupdate --protocol http2 --url http://credit-ingest:8080
     depends_on:
       credit-ingest:
         condition: service_healthy

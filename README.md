@@ -280,6 +280,14 @@ Both require `snow` CLI 3.0+ with an ACCOUNTADMIN connection. Option A also need
 
 Runs the producer + a local Cloudflare quick tunnel in Docker (no cloud, no GCP, no public IP). It writes `.env`, auto-detects your account, generates the ingest keypair, provisions all Snowflake objects, creates the `CREDIT_INGEST_USR` service user, captures the ephemeral tunnel URL, and deploys the dashboard. Idempotent and re-runnable. Stop the local producer/tunnel with `./quickstart.sh --down`. Then `snow app open --connection <your-snow-connection>`.
 
+**Keeping the quick tunnel alive.** The `*.trycloudflare.com` URL is ephemeral and rotates whenever the tunnel container restarts. Leave the self-healer running so the demo never breaks:
+
+```bash
+./quickstart.sh --watch <your-snow-connection> &   # re-pushes the URL to Snowflake on change; app self-heals in ~60s
+```
+
+**Want a URL that never changes?** Set `CLOUDFLARE_TUNNEL_TOKEN` (from the free Cloudflare Zero Trust dashboard) and `INGEST_TUNNEL_HOST` (the hostname you route to the tunnel) in `.env`, then re-run `./quickstart.sh`. It auto-detects the token and uses a **named tunnel** with a stable hostname — no `--watch` needed. See [VM ingest setup](#vm-ingest-setup), Path B.
+
 <details>
 <summary>What the one command does, step by step (or to run it manually)</summary>
 
@@ -518,7 +526,7 @@ At a typical effective enterprise rate (~$2/credit) this demo idle costs roughly
 | `setup.sql` | Single source of truth for all Snowflake DDL (database/schema/warehouses/pool/EAI/roles/tables/agent/search service/grants), envsubst-templated from `.env` |
 | `semantic_view.sql` | Defines `CREDIT_SV` for the agent's text-to-SQL tool, also envsubst-templated |
 | `web/snowflake.yml` | Snowflake App manifest for SPCS deployment, envsubst-templated |
-| `quickstart.sh` | One command for a fresh account: scaffolds `.env`, generates the ingest keypair, provisions objects (`--infra-only`), creates the ingest user, starts the local producer + quick tunnel, captures the URL, and deploys. `--down` stops the local containers |
+| `quickstart.sh` | One command for a fresh account: scaffolds `.env`, generates the ingest keypair, provisions objects (`--infra-only`), creates the ingest user, starts the local producer + tunnel, captures the URL, and deploys. Uses a named tunnel automatically if `CLOUDFLARE_TUNNEL_TOKEN` is set, else the quick tunnel. `--watch` self-heals a rotated quick-tunnel URL (re-pushes to `APP_CONFIG` + network rule); `--down` stops the local containers |
 | `deploy-app.sh` | Render templates → run setup SQL (`--bootstrap` / `--infra-only`) → push runtime config → `snow app deploy` |
 | `.env.example` | All 23 envsubst variables with documented defaults |
 | `web/server.js` | Custom standalone server that monkey-patches Next.js's `server.js` to handle WebSocket upgrades on `/api/ws` |
