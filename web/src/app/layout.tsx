@@ -7,9 +7,9 @@ import { useWebSocket } from "@/lib/ws";
 
 function Nav() {
   const pathname = usePathname();
-  const isDesk = pathname === "/";
+  const isDesk = pathname === "/desk";
   const isAsk = pathname === "/ask";
-  const isDemo = pathname === "/demo";
+  const isDemo = pathname === "/demo" || pathname === "/";
   const isLatency = pathname === "/latency";
 
   return (
@@ -23,7 +23,7 @@ function Nav() {
         Demo
       </Link>
       <Link
-        href="/"
+        href="/desk"
         className={`pb-2 text-sm transition-colors ${
           isDesk ? "tab-active" : "tab-inactive hover:text-slate-300"
         }`}

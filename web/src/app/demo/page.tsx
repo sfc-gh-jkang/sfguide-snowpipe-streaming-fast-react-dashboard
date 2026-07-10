@@ -109,7 +109,7 @@ export default function DemoPage() {
           </p>
         </div>
         <Link
-          href="/"
+          href="/desk"
           className="shrink-0 text-xs font-medium px-3 py-2 rounded bg-slate-800 border border-slate-700 hover:border-slate-500 text-slate-200"
         >
           Open full desk →
@@ -225,7 +225,7 @@ export default function DemoPage() {
       </div>
 
       <footer className="text-center text-[11px] text-slate-600 pt-2">
-        Demo view · <Link href="/" className="text-slate-400 hover:text-slate-200">full credit desk</Link> · producer runs outside Snowflake (GCP VM); everything else is in-Snowflake
+        Demo view · <Link href="/desk" className="text-slate-400 hover:text-slate-200">full credit desk</Link> · producer runs outside Snowflake (GCP VM); everything else is in-Snowflake
       </footer>
     </div>
   );
