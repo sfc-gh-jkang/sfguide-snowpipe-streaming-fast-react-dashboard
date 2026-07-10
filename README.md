@@ -299,10 +299,12 @@ cp .env.example .env                # fill SNOWFLAKE_CONNECTION + SNOWFLAKE_ACCO
 #   openssl rsa -in vm-ingest/keys/credit_ingest.p8 -pubout -out vm-ingest/keys/credit_ingest.pub
 #   snow sql -c <conn> -q "CREATE USER IF NOT EXISTS CREDIT_INGEST_USR TYPE=SERVICE RSA_PUBLIC_KEY='<pubkey>' DEFAULT_WAREHOUSE=CREDIT_DEMO_WH DEFAULT_ROLE=CREDIT_INGEST_RL; GRANT ROLE CREDIT_INGEST_RL TO USER CREDIT_INGEST_USR;"
 cd vm-ingest && cp .env.example .env && docker compose --profile quick up -d --build
-docker logs credit-cloudflared-quick | grep trycloudflare    # paste host into top-level .env INGEST_TUNNEL_HOST
+docker compose --profile quick logs cloudflared-quick | grep trycloudflare   # paste host into top-level .env INGEST_TUNNEL_HOST
 cd .. && ./deploy-app.sh            # push tunnel config + deploy the app
 ```
 </details>
+
+**Running more than one account at once.** `quickstart.sh` namespaces each instance by its connection name — distinct compose project (`credit-<connection>`), container names (`credit-ingest-<connection>`, …), and an auto-picked free host port. Clone the repo once per account and run `./quickstart.sh <connection>` in each; the two demos coexist on one laptop with no hand-editing and never clobber each other's containers. Use `./quickstart.sh --down <connection>` to stop a specific one.
 
 ### Option B — VM (cloud or on-prem)
 

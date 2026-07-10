@@ -1,10 +1,10 @@
 services:
   credit-ingest:
     build: .
-    container_name: credit-ingest
+    container_name: credit-ingest-${CREDIT_INSTANCE:-local}
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${INGEST_HOST_PORT:-8080}:8080"
     volumes:
       - ./keys:/etc/credit/keys:ro
     environment:
@@ -36,7 +36,7 @@ services:
 
   observe-agent:
     image: observeinc/observe-agent:2.0.0
-    container_name: credit-observe-agent
+    container_name: credit-observe-agent-${CREDIT_INSTANCE:-local}
     restart: unless-stopped
     # Optional OpenTelemetry → Observe.inc sidecar. Opt-in only: needs a
     # generated observe-agent.yaml (from observe-agent.yaml.tpl + Observe tokens).
@@ -57,7 +57,7 @@ services:
   # Remove this service if you run cloudflared on the host instead (Path 2).
   cloudflared:
     image: cloudflare/cloudflared:2025.7.0
-    container_name: credit-cloudflared
+    container_name: credit-cloudflared-${CREDIT_INSTANCE:-local}
     restart: unless-stopped
     command: tunnel --no-autoupdate --protocol http2 run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
@@ -72,7 +72,7 @@ services:
   # Each restart yields a NEW random URL (tunnel is anonymous + ephemeral).
   cloudflared-quick:
     image: cloudflare/cloudflared:2025.7.0
-    container_name: credit-cloudflared-quick
+    container_name: credit-cloudflared-quick-${CREDIT_INSTANCE:-local}
     restart: unless-stopped
     command: tunnel --no-autoupdate --protocol http2 --url http://credit-ingest:8080
     depends_on:
