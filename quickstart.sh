@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
 VM_DIR="$SCRIPT_DIR/vm-ingest"
 KEYS_DIR="$VM_DIR/keys"
-QUICK_TUNNEL_CONTAINER="credit-cloudflared-quick-local"   # overridden per-connection below
+QUICK_TUNNEL_CONTAINER="credit-cloudflared-quick"   # overridden per-connection below
 
 green() { printf '\033[0;32m%s\033[0m\n' "$1"; }
 info()  { printf '\n==> %s\n' "$1"; }

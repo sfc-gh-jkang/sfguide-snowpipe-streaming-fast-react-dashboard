@@ -546,7 +546,7 @@ At a typical effective enterprise rate (~$2/credit) this demo idle costs roughly
 | `web/snowflake.yml` | Snowflake App manifest for SPCS deployment, envsubst-templated |
 | `quickstart.sh` | One command for a fresh account: scaffolds `.env`, generates the ingest keypair, provisions objects (`--infra-only`), creates the ingest user, starts the local producer + tunnel, captures the URL, and deploys. Uses a named tunnel automatically if `CLOUDFLARE_TUNNEL_TOKEN` is set, else the quick tunnel. Namespaces each instance by connection (compose project + container names + free host port) so accounts coexist. `--watch` self-heals a rotated quick-tunnel URL; `--down <conn>` stops the local containers; `--teardown <conn>` also drops the SPCS app |
 | `deploy-app.sh` | Render templates → run setup SQL (`--bootstrap` / `--infra-only`) → push runtime config → `snow app deploy`. `--render-only` renders without deploying; `--teardown` drops the deployed SPCS app (renders `snowflake.yml` first, then `snow app teardown`) |
-| `.env.example` | All 23 envsubst variables with documented defaults |
+| `.env.example` | All configuration variables with documented defaults (Snowflake object names, tunnel, ingest key, optional `INGEST_HOST_PORT`) |
 | `web/server.js` | Custom standalone server that monkey-patches Next.js's `server.js` to handle WebSocket upgrades on `/api/ws` |
 | `web/src/app/layout.tsx` | Root layout with the four-tab nav (Demo / Live Credit Desk / Ask the Book / How fresh & fast?) and global WS provider |
 | `web/src/app/page.tsx` | Live Credit Desk page — KPI tiles, latency timeline, live tape, sector donut, top marks, watchlist |

@@ -218,9 +218,9 @@ The dashboard is a `snowflake-app` **application service** (`SNOWFLAKE_EXAMPLE.C
 
 | Path | Image pulls | Syntax | Resource graph | Live UI | Live ingest |
 |---|---|---|---|---|---|
-| A — Quick-tunnel | ✅ | ✅ | ✅ | ✅ | ✅ verified end-to-end |
+| A — Quick-tunnel (laptop, `quickstart.sh`) | ✅ | ✅ | ✅ | ✅ | ✅ verified end-to-end on **AWS (us-east-1, us-west-2), Azure, and GCP** — from a fresh clone, no hand-editing |
 | B — Named tunnel | ✅ | ✅ | ✅ | ⏸ needs your token | ⏸ needs your token |
 | C — Bootstrap script | n/a | ✅ | n/a | ⏸ needs Ubuntu VM | ⏸ |
 | D — Terraform | ✅ | ✅ | ✅ `terraform plan` | ⏸ needs `terraform apply` | ⏸ |
 
-Items marked ⏸ should be tested by the first SE who deploys this from a fresh clone.
+Items marked ⏸ should be tested by the first SE who deploys this from a fresh clone. Path A is the `quickstart.sh` path and has been run repeatedly across all three clouds, including two demos side-by-side on one laptop (auto-namespaced compose project + container names + host port).
