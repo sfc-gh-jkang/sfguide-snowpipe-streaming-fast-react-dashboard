@@ -10,7 +10,9 @@ import json
 import logging
 import os
 import random
+import threading
 import time
+import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -45,6 +47,13 @@ SF_BOOK_TABLE = os.environ.get("SNOWFLAKE_BOOK_TABLE", "POSITION_BOOK")
 SF_KEY_PATH = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH", "/etc/credit/keys/credit_ingest.p8")
 API_KEY = os.environ.get("INGEST_API_KEY", "")
 PARTITION_COUNT = int(os.environ.get("PARTITION_COUNT", "4"))
+# Self-healing: cloudflared exposes its live quick-tunnel hostname at
+# ${TUNNEL_METRICS_URL}/quicktunnel. When set (quick-tunnel profile), the
+# producer registers the current host into APP_CONFIG whenever it rotates, so
+# the dashboard self-heals with zero operator action. Unset/unreachable (named
+# tunnel or host-mode cloudflared) → registration is skipped.
+TUNNEL_METRICS_URL = os.environ.get("TUNNEL_METRICS_URL", "").rstrip("/")
+SELF_HEAL_INTERVAL_S = int(os.environ.get("SELF_HEAL_INTERVAL_S", "15"))
 
 # Reference position IDs (POS-0001 through POS-0062)
 POSITION_IDS = [f"POS-{i:04d}" for i in range(1, 63)]
@@ -277,6 +286,67 @@ def _write_through(raw_row: dict, partition_key: str) -> dict:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Self-healing daemon: keep APP_CONFIG pointed at the live tunnel host, and
+# re-open streaming channels if a failed startup init left them empty.
+# ---------------------------------------------------------------------------
+def _current_tunnel_host() -> str | None:
+    """Live quick-tunnel hostname from cloudflared's /quicktunnel metrics
+    endpoint. None if TUNNEL_METRICS_URL is unset/unreachable (named tunnel or
+    host-mode cloudflared) — caller then skips registration."""
+    if not TUNNEL_METRICS_URL:
+        return None
+    try:
+        with urllib.request.urlopen(f"{TUNNEL_METRICS_URL}/quicktunnel", timeout=5) as r:
+            host = (json.loads(r.read().decode()).get("hostname") or "").strip()
+        return host or None
+    except Exception:
+        return None
+
+
+def _register_tunnel_host(host: str) -> None:
+    """Publish the tunnel host into APP_CONFIG + the egress rule via the
+    least-privilege owner's-rights proc (short-lived keypair session)."""
+    import snowflake.connector
+
+    conn = snowflake.connector.connect(
+        account=SF_ACCOUNT, user=SF_USER, private_key_file=SF_KEY_PATH,
+        role=SF_ROLE, database=SF_DB, schema=SF_SCHEMA,
+    )
+    try:
+        conn.cursor().execute(
+            f"CALL {SF_DB}.{SF_SCHEMA}.SP_SET_INGEST_HOST(%s)", (host,)
+        )
+    finally:
+        conn.close()
+
+
+def _self_heal_loop() -> None:
+    """Daemon: (1) register a rotated quick-tunnel URL into APP_CONFIG so the
+    dashboard self-heals with no operator action; (2) re-open channels if a
+    startup init left them empty (channel_count == 0)."""
+    last_host: str | None = None
+    while True:
+        try:
+            host = _current_tunnel_host()
+            if host and host != last_host:
+                _register_tunnel_host(host)
+                last_host = host
+                log.info("Self-heal: registered tunnel host %s", host)
+        except Exception:
+            log.warning("Self-heal: tunnel registration failed (will retry)", exc_info=True)
+        try:
+            if service.get_status().get("channel_count", 0) == 0:
+                log.warning("Self-heal: RAW_EVENTS channels down — re-initializing")
+                service.initialize()
+            if book_service.get_status().get("channel_count", 0) == 0:
+                log.warning("Self-heal: POSITION_BOOK channels down — re-initializing")
+                book_service.initialize()
+        except Exception:
+            log.warning("Self-heal: channel re-init failed (will retry)", exc_info=True)
+        time.sleep(SELF_HEAL_INTERVAL_S)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize StreamingService on startup, fire warmup events, shut down on stop."""
@@ -344,6 +414,11 @@ async def lifespan(app: FastAPI):
         )
     except Exception:
         log.exception("Failed to initialize StreamingService")
+    # Start the self-healing daemon unconditionally — even if init failed above,
+    # its channel watchdog will retry initialize(), and it registers the live
+    # tunnel host so the dashboard self-heals a rotated quick-tunnel URL.
+    threading.Thread(target=_self_heal_loop, name="self-heal", daemon=True).start()
+    log.info("Self-heal daemon started (tunnel-host registration + channel watchdog, every %ds)", SELF_HEAL_INTERVAL_S)
     yield
     log.info("Shutting down StreamingService")
     service.shutdown()

@@ -282,13 +282,9 @@ Both require `snow` CLI 3.0+ with an ACCOUNTADMIN connection. Option A also need
 
 Runs the producer + a local Cloudflare quick tunnel in Docker (no cloud, no GCP, no public IP). It writes `.env`, auto-detects your account, generates the ingest keypair, provisions all Snowflake objects, creates the `CREDIT_INGEST_USR` service user, captures the ephemeral tunnel URL, and deploys the dashboard. Idempotent and re-runnable. Stop the local producer/tunnel with `./quickstart.sh --down`. Then `snow app open --connection <your-snow-connection>`.
 
-**Keeping the quick tunnel alive.** The `*.trycloudflare.com` URL is ephemeral and rotates whenever the tunnel container restarts. Leave the self-healer running so the demo never breaks:
+**The quick tunnel self-heals automatically.** The `*.trycloudflare.com` URL is ephemeral and rotates whenever the tunnel container restarts — but you don't have to do anything. The producer polls cloudflared's `/quicktunnel` metrics endpoint and, whenever the URL changes, calls a least-privilege stored proc (`SP_SET_INGEST_HOST`) that updates `APP_CONFIG` + the egress network rule; the dashboard re-reads `APP_CONFIG` every ~60s and recovers. This runs inside the compose stack — **no `--watch`, no launchd, no named tunnel required.** (A manual `./quickstart.sh --watch <conn> &` still exists as a laptop-side fallback, but is no longer needed.)
 
-```bash
-./quickstart.sh --watch <your-snow-connection> &   # re-pushes the URL to Snowflake on change; app self-heals in ~60s
-```
-
-**Want a URL that never changes?** Set `CLOUDFLARE_TUNNEL_TOKEN` (from the free Cloudflare Zero Trust dashboard) and `INGEST_TUNNEL_HOST` (the hostname you route to the tunnel) in `.env`, then re-run `./quickstart.sh`. It auto-detects the token and uses a **named tunnel** with a stable hostname — no `--watch` needed. See [VM ingest setup](#vm-ingest-setup), Path B.
+**Want a URL that never changes?** Set `CLOUDFLARE_TUNNEL_TOKEN` (from the free Cloudflare Zero Trust dashboard) and `INGEST_TUNNEL_HOST` (the hostname you route to the tunnel) in `.env`, then re-run `./quickstart.sh`. It auto-detects the token and uses a **named tunnel** with a stable hostname. See [VM ingest setup](#vm-ingest-setup), Path B.
 
 <details>
 <summary>What the one command does, step by step (or to run it manually)</summary>
@@ -728,7 +724,7 @@ These bugs were hit during the initial build. Documenting here so future contrib
 
 **Root cause**: The anonymous quick tunnel (a) has its QUIC connection reset on some corporate networks, and (b) gets a **new** `*.trycloudflare.com` URL on every container restart.
 
-**Fix**: cloudflared runs with `--protocol http2` (avoids the QUIC resets). For URL rotation, the app re-reads `APP_CONFIG` every ~60s (`web/src/server/vm-proxy.ts` `CONFIG_TTL_MS`), so a rotated URL self-heals **with no redeploy** once `APP_CONFIG` + the egress rule are updated. Run `./quickstart.sh --watch <connection> &` to push the live URL automatically, or use a **named tunnel** (set `CLOUDFLARE_TUNNEL_TOKEN` + `INGEST_TUNNEL_HOST`) for a stable hostname.
+**Fix**: cloudflared runs with `--protocol http2` (avoids the QUIC resets). For URL rotation, the **producer self-registers** — it polls cloudflared's `/quicktunnel` metrics endpoint and calls the least-privilege `SP_SET_INGEST_HOST` proc to update `APP_CONFIG` + the egress rule whenever the URL changes; the app re-reads `APP_CONFIG` every ~60s (`web/src/server/vm-proxy.ts` `CONFIG_TTL_MS`) and recovers with no redeploy and no operator action. Verified live: forced a tunnel rotation, producer re-registered the new URL within ~30s. A named tunnel (`CLOUDFLARE_TUNNEL_TOKEN` + `INGEST_TUNNEL_HOST`) avoids rotation entirely.
 
 ### 12. Two demos on one laptop clobber each other's containers
 

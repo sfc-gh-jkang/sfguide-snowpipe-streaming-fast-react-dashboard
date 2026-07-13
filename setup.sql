@@ -446,6 +446,38 @@ CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION ${DASHBOARD_EAI}
   ENABLED = TRUE;
 
 -- -------------------------------------------------------------------------
+-- 13b. Self-healing tunnel registration (zero-setup, no named tunnel needed)
+-- The ingest producer polls cloudflared's /quicktunnel metrics endpoint and
+-- CALLs this proc whenever the quick-tunnel hostname rotates, so APP_CONFIG +
+-- the egress network rule stay current with NO operator action (the dashboard
+-- re-reads APP_CONFIG every ~60s and self-heals). EXECUTE AS OWNER lets the
+-- narrow ${INGEST_ROLE} (keypair) call it WITHOUT holding ALTER/CREATE on the
+-- config objects — it can only invoke this one proc.
+-- -------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE ${APP_DB}.${APP_SCHEMA}.SP_SET_INGEST_HOST(HOST STRING)
+  RETURNS STRING
+  LANGUAGE SQL
+  EXECUTE AS OWNER
+AS
+$$
+BEGIN
+  MERGE INTO ${APP_DB}.${APP_SCHEMA}.${APP_CONFIG_TABLE} AS tgt
+  USING (SELECT 'INGEST_TUNNEL_HOST' AS KEY, :HOST AS VALUE) AS src
+  ON tgt.KEY = src.KEY
+  WHEN MATCHED THEN UPDATE SET VALUE = src.VALUE, UPDATED = CURRENT_TIMESTAMP()
+  WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (src.KEY, src.VALUE);
+
+  EXECUTE IMMEDIATE
+    'CREATE OR REPLACE NETWORK RULE ${APP_DB}.${APP_SCHEMA}.${INGEST_NETWORK_RULE} '
+    || 'MODE = EGRESS TYPE = HOST_PORT VALUE_LIST = (''' || :HOST || ':443'')';
+
+  RETURN 'INGEST_TUNNEL_HOST=' || :HOST;
+END;
+$$;
+
+GRANT USAGE ON PROCEDURE ${APP_DB}.${APP_SCHEMA}.SP_SET_INGEST_HOST(STRING) TO ROLE ${INGEST_ROLE};
+
+-- -------------------------------------------------------------------------
 -- 14. Dashboard role (read-only on demo tables + agent + search)
 -- -------------------------------------------------------------------------
 CREATE ROLE IF NOT EXISTS ${DASHBOARD_ROLE}
