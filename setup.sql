@@ -385,7 +385,7 @@ CREATE OR REPLACE AGENT ${APP_DB}.${APP_SCHEMA}.${AGENT_NAME}
   COMMENT = 'Credit desk analyst — text-to-SQL + fuzzy issuer search'
   FROM SPECIFICATION $$
 {
-  "models": {"orchestration": "auto"},
+  "models": {"orchestration": "claude-opus-4-8"},
   "instructions": {
     "response": "You are a credit-desk analyst assistant for ACME Credit Management. Answer concisely with numbers and tables. When showing P&L, sector exposure, or watchlist data, prefer markdown tables. For event-stream questions (recent trades, marks, downgrades), include event_ts. Always filter out EVENT_TYPE = 'WARMUP' rows unless specifically asked about warmup events.",
     "orchestration": "Use credit_book_analyst for ANY quantitative question (recent trades, P&L, sector breakdowns, top N, watchlist, marks, downgrades, counts, sums). Use issuer_search when the user mentions a specific issuer by partial or fuzzy name. Combine when needed: search to find the issuer name first, then analyst to compute its metrics. Never claim you have no data — always call credit_book_analyst first."
@@ -396,7 +396,7 @@ CREATE OR REPLACE AGENT ${APP_DB}.${APP_SCHEMA}.${AGENT_NAME}
   ],
   "tool_resources": {
     "credit_book_analyst": {
-      "execution_environment": {"type": "warehouse", "warehouse": "${STANDARD_WH}"},
+      "execution_environment": {"type": "warehouse", "warehouse": "${INTERACTIVE_WH}"},
       "semantic_view": "${APP_DB}.${APP_SCHEMA}.${SEMANTIC_VIEW_NAME}"
     },
     "issuer_search": {
