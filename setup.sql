@@ -396,7 +396,7 @@ CREATE OR REPLACE AGENT ${APP_DB}.${APP_SCHEMA}.${AGENT_NAME}
   ],
   "tool_resources": {
     "credit_book_analyst": {
-      "execution_environment": {"type": "warehouse", "warehouse": "${STANDARD_WH}"},
+      "execution_environment": {"type": "warehouse", "warehouse": "${INTERACTIVE_WH}"},
       "semantic_view": "${APP_DB}.${APP_SCHEMA}.${SEMANTIC_VIEW_NAME}"
     },
     "issuer_search": {
