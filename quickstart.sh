@@ -20,6 +20,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Back-compat: .env files written before INGEST_USER existed still work.
+: "${INGEST_USER:=CREDIT_INGEST_USR}"
 ENV_FILE="$SCRIPT_DIR/.env"
 VM_DIR="$SCRIPT_DIR/vm-ingest"
 KEYS_DIR="$VM_DIR/keys"
@@ -255,11 +257,11 @@ info "Provisioning Snowflake objects (deploy-app.sh --infra-only)..."
 "$SCRIPT_DIR/deploy-app.sh" --infra-only
 
 # --- 5. Create the ingest service user from the public key ----------------
-info "Creating the ${INGEST_ROLE} service user CREDIT_INGEST_USR..."
+info "Creating the ${INGEST_ROLE} service user ${INGEST_USER}..."
 PUBKEY="$(grep -v -- '-----' "$KEYS_DIR/credit_ingest.pub" | tr -d '\n')"
 [[ -n "$PUBKEY" ]] || die "Failed to read the public key from $KEYS_DIR/credit_ingest.pub"
 snow sql --connection "$CONN" --enable-templating NONE -q "
-CREATE USER IF NOT EXISTS CREDIT_INGEST_USR
+CREATE USER IF NOT EXISTS ${INGEST_USER}
   TYPE = SERVICE
   RSA_PUBLIC_KEY = '${PUBKEY}'
   DEFAULT_WAREHOUSE = ${STANDARD_WH}
@@ -269,13 +271,13 @@ CREATE USER IF NOT EXISTS CREDIT_INGEST_USR
 -- non-streaming queries (load POSITIONS_DIM, hydrate book from RAW_EVENTS) need
 -- an active warehouse + role; without DEFAULT_WAREHOUSE they fail with
 -- 'No active warehouse selected'.
-ALTER USER CREDIT_INGEST_USR SET
+ALTER USER ${INGEST_USER} SET
   RSA_PUBLIC_KEY = '${PUBKEY}'
   DEFAULT_WAREHOUSE = ${STANDARD_WH}
   DEFAULT_ROLE = ${INGEST_ROLE};
-GRANT ROLE ${INGEST_ROLE} TO USER CREDIT_INGEST_USR;
+GRANT ROLE ${INGEST_ROLE} TO USER ${INGEST_USER};
 "
-green "  CREDIT_INGEST_USR ready (keypair auth)"
+green "  ${INGEST_USER} ready (keypair auth)"
 
 # --- 6. Start the local producer + Cloudflare tunnel ----------------------
 # Named tunnel (stable hostname) if CLOUDFLARE_TUNNEL_TOKEN is set; else the

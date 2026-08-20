@@ -12,10 +12,10 @@ services:
       # like "<your-snowflake-account>" silently passes the placeholder through
       # to the HPA SDK, which then fails JWT auth with a confusing error.
       SNOWFLAKE_ACCOUNT: "${SNOWFLAKE_ACCOUNT:-<set-via-env-SNOWFLAKE_ACCOUNT>}"
-      SNOWFLAKE_USER: "CREDIT_INGEST_USR"
-      SNOWFLAKE_ROLE: "CREDIT_INGEST_RL"
-      SNOWFLAKE_DATABASE: "SNOWFLAKE_EXAMPLE"
-      SNOWFLAKE_SCHEMA: "CREDIT_DEMO"
+      SNOWFLAKE_USER: "${INGEST_USER:-CREDIT_INGEST_USR}"
+      SNOWFLAKE_ROLE: "${INGEST_ROLE:-CREDIT_INGEST_RL}"
+      SNOWFLAKE_DATABASE: "${APP_DB:-SNOWFLAKE_EXAMPLE}"
+      SNOWFLAKE_SCHEMA: "${APP_SCHEMA:-CREDIT_DEMO}"
       SNOWFLAKE_TABLE: "RAW_EVENTS"
       # Strategy-2 pre-agg write-through target (second interactive table).
       SNOWFLAKE_BOOK_TABLE: "POSITION_BOOK"

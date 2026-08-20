@@ -690,7 +690,7 @@ These bugs were hit during the initial build. Documenting here so future contrib
 
 **Symptom**: On a fresh account, `setup.sql` fails partway (e.g. Cortex Search build errors with "Querying non-interactive table ... is not supported in interactive warehouses", or a DDL times out at 5s).
 
-**Root cause**: `CREATE WAREHOUSE <interactive>` sets it as the **session-current warehouse**. Everything after runs on the interactive WH, which has a 5s query timeout and can only query interactive tables.
+**Root cause**: `CREATE WAREHOUSE <interactive>` sets it as the **session-current warehouse**. Everything after runs on the interactive WH, which has a hard 5s query timeout. (It can read standard tables too -- Zero-Copy Interactive -- so the issue is the cap, not a table-type restriction.)
 
 **Fix**: `setup.sql` runs `USE WAREHOUSE ${STANDARD_WH};` immediately after the interactive-WH block. Any script that creates an interactive warehouse must reset the current warehouse right after.
 

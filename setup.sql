@@ -246,6 +246,18 @@ CREATE WAREHOUSE IF NOT EXISTS ${INTERACTIVE_WH}
   INITIALLY_SUSPENDED = TRUE
   COMMENT = 'ACME demo Interactive WH';
 
+-- A fallback warehouse is MANDATORY, not optional. Any query that exceeds the
+-- interactive warehouse's hard 5-second cap FAILS OUTRIGHT without one --
+-- verified: 000630 (57014) "Statement reached its statement or warehouse timeout
+-- of 5 second(s) and was canceled". With a fallback, the same query is
+-- transparently re-run on standard compute, so the demo degrades instead of
+-- erroring in front of a customer.
+ALTER WAREHOUSE ${INTERACTIVE_WH} SET FALLBACK_WAREHOUSE = ${STANDARD_WH};
+
+-- Verify it took. NOTE: there is NO fallback_warehouse column in SHOW WAREHOUSES
+-- (the docs imply otherwise) -- SHOW PARAMETERS is the only way to confirm.
+SHOW PARAMETERS LIKE '%FALLBACK%' IN WAREHOUSE ${INTERACTIVE_WH};
+
 -- Associate the streaming targets so the Interactive WH can serve them. Both
 -- RAW_EVENTS (strategies 1 & 3, query-time rollup) and POSITION_BOOK (strategy 2,
 -- pre-agg write-through) are interactive tables served by this same WH.
@@ -257,7 +269,9 @@ ALTER WAREHOUSE ${INTERACTIVE_WH} ADD TABLES (
 -- CREATE WAREHOUSE above set the INTERACTIVE WH as the session's current
 -- warehouse. Switch back to the standard WH so the rest of this script (network
 -- rules, Cortex Search build) does NOT run on the interactive WH — which has a
--- 5s query timeout and cannot query non-interactive tables like POSITIONS_DIM.
+-- 5s query timeout. (Zero-Copy Interactive means an interactive warehouse CAN
+-- read standard tables like POSITIONS_DIM -- verified live on AWS, Azure and GCP.
+-- We still switch back because of the 5s cap, not a table-type restriction.)
 USE WAREHOUSE ${STANDARD_WH};
 
 -- -------------------------------------------------------------------------
@@ -283,11 +297,11 @@ GRANT INSERT ON TABLE ${APP_DB}.${APP_SCHEMA}.POSITION_BOOK TO ROLE ${INGEST_ROL
 GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.POSITION_BOOK TO ROLE ${INGEST_ROLE};
 GRANT SELECT ON TABLE ${APP_DB}.${APP_SCHEMA}.POSITIONS_DIM TO ROLE ${INGEST_ROLE};
 
--- CREATE USER IF NOT EXISTS CREDIT_INGEST_USR
+-- CREATE USER IF NOT EXISTS ${INGEST_USER}
 --   TYPE = SERVICE
 --   RSA_PUBLIC_KEY = '<paste-public-key-here>'
 --   COMMENT = 'Snowpipe Streaming producer service account';
--- GRANT ROLE ${INGEST_ROLE} TO USER CREDIT_INGEST_USR;
+-- GRANT ROLE ${INGEST_ROLE} TO USER ${INGEST_USER};
 
 -- -------------------------------------------------------------------------
 -- 7. Stage for SiS deployment
@@ -358,7 +372,7 @@ CREATE CORTEX SEARCH SERVICE IF NOT EXISTS ${APP_DB}.${APP_SCHEMA}.POSITIONS_SEA
 
 -- -------------------------------------------------------------------------
 -- 11. Cortex Agent (text-to-SQL + fuzzy search)
---     Requires: semantic_view.sql to have been run first (CREDIT_SV).
+--     Requires: semantic_view.sql to have been run first (${SEMANTIC_VIEW_NAME}).
 --     Run this section AFTER semantic_view.sql, or accept the error and re-run.
 -- -------------------------------------------------------------------------
 -- IMPORTANT: use FROM SPECIFICATION $$...$$  (NOT  SPEC = '{...}').
@@ -383,7 +397,7 @@ CREATE OR REPLACE AGENT ${APP_DB}.${APP_SCHEMA}.${AGENT_NAME}
   "tool_resources": {
     "credit_book_analyst": {
       "execution_environment": {"type": "warehouse", "warehouse": "${STANDARD_WH}"},
-      "semantic_view": "${APP_DB}.${APP_SCHEMA}.CREDIT_SV"
+      "semantic_view": "${APP_DB}.${APP_SCHEMA}.${SEMANTIC_VIEW_NAME}"
     },
     "issuer_search": {
       "id_column": "POSITION_ID",

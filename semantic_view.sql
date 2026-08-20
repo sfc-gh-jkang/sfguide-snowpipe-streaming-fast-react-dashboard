@@ -1,12 +1,12 @@
 -- ==========================================================================
 -- ACME Credit Management — Semantic View for Cortex Analyst
--- Target: ${APP_DB}.${APP_SCHEMA}.CREDIT_SV
+-- Target: ${APP_DB}.${APP_SCHEMA}.${SEMANTIC_VIEW_NAME}
 -- ==========================================================================
 
 USE ROLE ACCOUNTADMIN;
 USE WAREHOUSE ${STANDARD_WH};
 
-CREATE OR REPLACE SEMANTIC VIEW ${APP_DB}.${APP_SCHEMA}.CREDIT_SV
+CREATE OR REPLACE SEMANTIC VIEW ${APP_DB}.${APP_SCHEMA}.${SEMANTIC_VIEW_NAME}
   TABLES (
     ${APP_DB}.${APP_SCHEMA}.POSITIONS_DIM
       PRIMARY KEY (POSITION_ID)

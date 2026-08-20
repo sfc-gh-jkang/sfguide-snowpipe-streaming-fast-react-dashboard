@@ -132,7 +132,9 @@ export async function executeQuery(sql: string, opts?: ExecuteQueryOptions): Pro
 export async function loadAppConfig(): Promise<Record<string, string>> {
   try {
     // APP_CONFIG is a standard table — read it on the standard WH. The default
-    // (interactive) warehouse can only query interactive tables.
+    // (interactive) warehouse has a hard 5s query cap. (It CAN read standard
+    // tables -- Zero-Copy Interactive, verified on AWS/Azure/GCP -- so the old
+    // 'interactive tables only' restriction no longer applies.)
     const rows = await executeQuery(
       `SELECT KEY, VALUE FROM ${APP_FQN}.APP_CONFIG`,
       { warehouse: STANDARD_WH }
